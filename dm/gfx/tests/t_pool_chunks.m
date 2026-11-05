@@ -85,13 +85,8 @@ int main(void) { @autoreleasepool {
     mtl_tex_release(&t);
     // Raw global memory: the driver has given out no address in the pool, so the table leaves it out and it stays in chunks
     mtl_sub_begin(); CHECK("pool table made", gmem_map_gpu() != 0); finish();
-    CHECK("a pool with no address given out stays out", g_big[0].full == 0);
-    // The address ranges merge and stay sorted
-    mtl_pool_addressed((void *)0x1000, 0x1000); mtl_pool_addressed((void *)0x3000, 0x1000); mtl_pool_addressed((void *)0x2000, 0x1000); CHECK("touching ranges merge", g_naddr == 1 && g_addr[0].lo == 0x1000 && g_addr[0].hi == 0x4000);
-    mtl_pool_addressed((void *)0x2000, 0x100); CHECK("a covered range adds nothing", g_naddr == 1);
-    mtl_pool_addressed((void *)0x8000, 0x1000); CHECK("a separate range", g_naddr == 2 && addr_meets(0x8800, 0x8900) && !addr_meets(0x5000, 0x6000) && addr_meets(0x3fff, 0x5000) && !addr_meets(0x4000, 0x5000));
-    // Once one is given out, the table reaches all of it, and lookups then have the whole pool
-    mtl_pool_addressed((void *)(uintptr_t)(base + 900 * MB), 4096);
+    CHECK("no buffer address taken in the pool: the table does not take it whole", !g_big[0].full);
+    mtl_pool_buffer_addr(mem, GB);   // nvnMemoryPoolGetBufferAddress
     mtl_sub_begin(); CHECK("pool table made again", gmem_map_gpu() != 0); finish();
     CHECK("the whole pool has an entry", g_big[0].full > 0 && g_pools[g_big[0].full - 1].end == base + GB);
     CHECK("lookups take it", look(base + 900 * MB, 4096).length == GB);
