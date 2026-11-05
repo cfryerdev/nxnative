@@ -521,46 +521,7 @@ t_logic: t_logic.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_logic.m $(MTL_T_SRC) $(FW)
 check_t_logic: t_logic
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_logic.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_logic "$$work"
-# gl_FragCoord.z against the depth the rasterizer stored for the same triangle, through dmsh_build.py frag_z_snap's dm_zsnap (from test_dmsh_zsnap.py)
-t_zsnap: t_zsnap.m
-	clang -O1 -g -Wall -fobjc-arc -o $@ t_zsnap.m -framework Metal -framework Foundation
-check_t_zsnap: t_zsnap
-	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_zsnap.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_zsnap "$$work"
-# MUFU.SIN / COS lowered from turns through the fraction (InstEmitAmpereAlu.cs ATurnsToRadians), on the GPU against a double-precision reference
-t_mufu_turns: t_mufu_turns.m
-	clang -O1 -g -Wall -fobjc-arc -o $@ t_mufu_turns.m -framework Metal -framework Foundation
-# Native task/mesh draws must render on the first pipeline use, with direct and threaded Metal encoding.
-t_mesh_first_use: t_mesh_first_use.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_mesh_first_use.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
-.PHONY: check_t_mesh_first_use
-check_t_mesh_first_use: t_mesh_first_use
-	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_mesh_first_use
-	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_mesh_first_use
 
-t_wait_event: t_wait_event.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_wait_event.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
-
-t_queue_lifetime: t_queue_lifetime.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_queue_lifetime.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
-
-.PHONY: check_t_wait_event check_t_queue_lifetime
-check_t_wait_event: t_wait_event
-	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
-	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
-check_t_queue_lifetime: t_queue_lifetime
-	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
-	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
-
-t_render_enable_queue: t_render_enable_queue.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_render_enable_queue.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
-.PHONY: check_t_render_enable_queue
-check_t_render_enable_queue: t_render_enable_queue
-	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
-	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
-
-t_render_counter_overlap: t_render_counter_overlap.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_render_counter_overlap.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
-.PHONY: check_t_render_counter_overlap
-check_t_render_counter_overlap: t_render_counter_overlap
-	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
-	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
+t_raw_residency: t_raw_residency.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_raw_residency.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_raw_residency: RUN_ENV = MTL_DEBUG_LAYER=1

@@ -229,6 +229,10 @@ Turn off **Show this window at launch** to start the game at once with your choi
 
 **Window** or **Fullscreen**: how the game's window opens. ⌃⌘F or the green button changes it while you play. In an `env.txt`: `DM_FULLSCREEN=1` or `0`.
 
+### Game file
+
+An app packed without the game's files ([A Mac app](development.md#a-mac-app), `--no-romfs`) reads the game from a `.nup` file: **Choose game file…** picks it, and the game is read straight from it, so leave it where it is. **Scan for errors** checks the file — the table of contents, and the start of every file whose format can be checked, a few seconds — and opens a panel with what it found. Damaged files are named, with what they do to the game and what the fix is: the game asks for a damaged file again on every pass of its background loader, which keeps several CPU cores busy and drags the frame rate down, and only a good copy of the game file helps — copying the same file again brings the same bytes ([A damaged file in a NUP or a dump has no hash to fail](reference/packing.md#a-damaged-file-in-a-nup-or-a-dump-has-no-hash-to-fail)).
+
 ### Cloud saves folder
 
 **Choose a folder…** picks the iCloud Drive folder the game's save is synced through, the one the iPhone app chose in its launcher's **Cloud saves**, or the game's own folder inside it, named after its title ID ([Cloud saves](#cloud-saves)); **Turn off** stops it. Off by default. macOS may ask once whether the app may open iCloud Drive; if the game log says `this app may not open iCloud Drive`, allow it in System Settings › Privacy & Security › Files and Folders. In an `env.txt`: `DM_SAVE_SYNC=<folder>`, or `DM_SAVE_SYNC=icloud` for iCloud Drive › nxnative Saves; the window then shows it fixed.
