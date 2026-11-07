@@ -52,6 +52,30 @@ static void descriptor_replacement(void) {
     mtl_reg_tex(1,NULL,NULL);
     CHECK(!g_treg_serial.n, "clearing descriptors removes serial links");
 }
+// mtl_tex_gpu_owned: a GPU-only texture is made with render-target use (tex_desc), but it is the GPU's only once the GPU has written it (tex_gpu_wrote), and the record goes with the texture
+static void gpu_owned_after_write(void) {
+    const size_t len = 262144;
+    uint8_t *mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (mem == MAP_FAILED) abort();
+    pool_t pool = {0}; pool_builder_t pb = {.mem=mem, .size=len, .flags=NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
+    CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)&pool, (const NVNmemoryPoolBuilder *)&pb), "CPU-cached pool initialized");
+    NVNtextureBuilder tb; NVNtexture tex = {0}; h_nvnTextureBuilderSetDefaults(&tb);
+    h_nvnTextureBuilderSetWidth(&tb, 4); h_nvnTextureBuilderSetHeight(&tb, 4); h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8);
+    h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&pool, 65536);
+    CHECK(h_nvnTextureInitialize(&tex, &tb), "texture on zeroed storage initialized");
+    const tex_t *t = (const tex_t *)&tex; uint64_t serial = t->serial;
+    mtl_sub_begin();
+    id<MTLTexture> mt = tex_mtl(t);
+    CHECK(mt && (mt.usage & MTLTextureUsageRenderTarget), "a GPU-only uncompressed texture is made with render-target use");
+    CHECK(!mtl_tex_gpu_owned(serial) && mtl_tex_gpu_writes(serial) == 0, "made for render-target use but never written: not the GPU's");
+    tex_gpu_wrote(t, GW_ATTACH);
+    CHECK(mtl_tex_gpu_owned(serial) && mtl_tex_gpu_writes(serial) == GW_ATTACH, "drawn into as an attachment: the GPU's");
+    tex_gpu_wrote(t, GW_COPY);
+    CHECK(mtl_tex_gpu_writes(serial) == (GW_ATTACH | GW_COPY), "the kinds of GPU write accumulate");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "submission completed");
+    h_nvnTextureFinalize(&tex);
+    CHECK(mtl_tex_gpu_writes(serial) == 0 && !mtl_tex_gpu_owned(serial), "finalizing the texture drops its record of GPU writes");
+}
 static void finalized_upload(int write_after_record) {
     const size_t len = 262144;
     uint8_t *mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
@@ -175,6 +199,6 @@ int main(int argc, const char **argv) { @autoreleasepool {
     own.serial = 900002; mtl_tex_init(&own); moved = own; own.magic = 0; mtl_tex_release(&moved);
     CHECK(!nvn_hm_get(&g_tex_live, &moved.serial), "a copy outliving the object it was initialized in ends the texture");
     retired_classification(); descriptor_replacement();
-    if (argc > 1 && !strcmp(argv[1], "--metal")) { mtl_init(); finalized_upload(0); finalized_upload(1); finalize_during_walk(); }
+    if (argc > 1 && !strcmp(argv[1], "--metal")) { mtl_init(); finalized_upload(0); finalized_upload(1); finalize_during_walk(); gpu_owned_after_write(); }
     printf("t_cpu_tex: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

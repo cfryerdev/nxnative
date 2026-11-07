@@ -267,7 +267,8 @@ void mtl_reg_tex_gone(int id);   // the ID stays registered, its memory pool fin
 void mtl_reg_image(int id, const tex_t *t, const view_t *v);   // RegisterImage declares image use even when the builder omitted IMAGE
 // textures written by WriteTexels (recorded by serial): the replay layer treats them like packaged textures, uploaded from guest memory and re-uploaded on dirty pages
 void mtl_tex_cpu_written(const tex_t *t);
-int mtl_tex_gpu_owned(uint64_t serial);                                  // its host texture is a render target or shader-writable: GPU content, never re-uploaded from guest memory
+int mtl_tex_gpu_owned(uint64_t serial);                                  // its host texture is a render target or shader-writable and the GPU has written it: GPU content, never re-uploaded from guest memory
+unsigned mtl_tex_gpu_writes(uint64_t serial);                            // what the GPU has written it through (GW_* in nvn_mtl.m), 0 when nothing
 // hle_nvn.c: a texture tex_flush_upload / tex_dirty_upload registered and has not resolved yet; GPU copies written into the destination texture's storage as well (see there)
 int nvn_ft_tracked(uint64_t serial);
 int nvn_tex_mirror_b2t(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, const uint8_t *src, size_t row, size_t img);
@@ -284,3 +285,5 @@ void mtl_prog_forget(const prog_t *p);   // program finalize, submit lock held: 
 uint64_t nvn_new_serial(void);
 // Serials handed out from now on are above s (dm/gfx/tests/nvn_replay.m: the objects of a capture keep the live run's serials)
 void nvn_serial_floor(uint64_t s);
+uint64_t mtl_pkg_copy_absorbs(void);
+int nvn_tex_level_range(const tex_t *t, unsigned level, unsigned layer, uint64_t *lo, uint64_t *hi);
