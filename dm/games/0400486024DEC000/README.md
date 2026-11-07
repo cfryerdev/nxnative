@@ -101,6 +101,7 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 
 ## Found on this game
 
+- [Uncompressed storage beside storage the GPU writes](../../../docs/reference/nvn-objects.md#uncompressed-storage-beside-storage-the-gpu-writes): resolved, the ground opening in holes after walking out of a cave and back (the terrain's height and blend maps came out as zeros once the first normal map had been drawn into their pool); a reload had hidden it.
 - [A damaged file in a NUP or a dump has no hash to fail](../../../docs/reference/packing.md#a-damaged-file-in-a-nup-or-a-dump-has-no-hash-to-fail): a contributor's NUP held three `.zs` textures beginning with zeros, and the background loader reloaded the fairy fountain model for ever (412% CPU); this repository's copy has none.
 - [A control section's words read as a BAHS entry](../../../docs/reference/shaders.md#a-control-sections-words-read-as-a-bahs-entry): six map rows that were no shaders, one of them failing the build; `tera_common` gave its variation pairs once its row was gone.
 - [Freeing a memory pool during a texture ID walk](../../../docs/reference/nvn-objects.md#freeing-a-memory-pool-during-a-texture-id-walk): the `-[NvPkg buffer]: unrecognized selector` crash after a save or a scene change.
@@ -126,6 +127,7 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 - [Memory pools nothing gave an address to stay out of the raw pool table](../../../docs/reference/memory.md#memory-pools-nothing-gave-an-address-to-stay-out-of-the-raw-pool-table)
 - [Shaders report which textures they read through a pool](../../../docs/reference/memory.md#shaders-report-which-textures-they-read-through-a-pool)
 - [Repeated GPU out-of-memory failures end the game](../../../docs/reference/memory.md#repeated-gpu-out-of-memory-failures-end-the-game)
+- [A texture ID with no texture kept its cached view](../../../docs/reference/rendering.md#a-texture-id-with-no-texture-kept-its-cached-view): the page faults at f3,677 and f4,851 with the render-target reclaim on.
 - [Texture IDs of one storage share one packaged texture](../../../docs/reference/nvn-objects.md#texture-ids-of-one-storage-share-one-packaged-texture)
 - [Finalizing a copy of a texture object](../../../docs/reference/nvn-objects.md#finalizing-a-copy-of-a-texture-object)
 - [Dynamic resolution that never moves, and draw passes that wait for each other](../../../docs/reference/frame-rate.md#dynamic-resolution-that-never-moves-and-draw-passes-that-wait-for-each-other)
