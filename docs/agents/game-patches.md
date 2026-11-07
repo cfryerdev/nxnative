@@ -90,7 +90,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
 | [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 43 | 0 | 0 | `build` → `game` ×2 |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
-| [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 0 | 0 | 1 | 0 | 0 | `build` → `game` |
+| [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 0 | 0 | 2 | 0 | 0 | `build` → `game` ×2 |
 | [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 9 | 0 | 0 | `build` → `game` |
 | [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 0 | 0 | 0 | `build` → `game` |
 
@@ -597,14 +597,12 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), `0400486024DEC000`, [patches.py](../../dm/games/0400486024DEC000/patches.py).
 
 - **`build` → `game`**, rendering, blocked: the store and its role are verified for this main build only, checked: v131072 main E0F3CCFAF50065AE4EA01EB5AEB13B1A, original store and surrounding code, 2026-11-06: dynamic-resolution ceiling. The game's final scale store follows its dynamic and fixed-mode choices
-
-- **v131072 `main`** `e0f3ccfa…` ([patches.py:61](../../dm/games/0400486024DEC000/patches.py#L61))
-  - frame step `+0x31d3f48`: dynamic resolution capped by the host render scale (1.0 = original)
-  - render scale stub (the launcher offers DM_RENDER_SCALE)
 - **`build` → `game`**, frame rate, blocked: frame-step stubs have no function-matched form yet, judgement: frame step from the measured frame time. This game's own frame loop; the frame-step state page is general
 
 - **v131072 `main`** `e0f3ccfa…` ([patches.py:61](../../dm/games/0400486024DEC000/patches.py#L61))
   - frame step `+0x6e6cc4`: frame step from the measured frame time, never below the game's own (state +0x38)
+  - frame step `+0x31d3f48`: dynamic resolution capped by the host render scale (1.0 = original)
+  - render scale stub (the launcher offers DM_RENDER_SCALE)
 
 ### The Legend of Zelda: Tears of the Kingdom
 
