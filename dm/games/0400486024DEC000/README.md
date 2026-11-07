@@ -17,6 +17,14 @@ A Switch 2 game: update v131072, SDK 22.2.8 (`Ounce`). Nintendo EPD's engine (se
 | `shader_groups`, `shader_note` | `game.tsv` | shaders grouped as `/Shader/`, `/Effect/`, `/Lib/`, `/UI/` |
 | `pad_layout full` | `game.tsv` | a 3D field and both sticks |
 
+## Render-scale ceiling
+
+Update v131072 (`main` build `e0f3ccfaf50065ae4ea01eb5aeb13b1a`) accepts `DM_RENDER_SCALE=0.5` through `1.0`. The default `1.0` keeps the game's original scale. Lower values cap the scale the engine has selected, so dynamic resolution can still reduce it further. The output size and the game's upscaler follow their existing paths. For example, a host ceiling of `0.5` keeps a game-selected `0.4` and caps a game-selected `0.75` to `0.5`.
+
+The rewriter checks the instruction at `main+0x31d3f48` before replacing its final scale store. The stub reads the existing host state page at `+0x10`, preserves the store's registers and condition flags, and advertises `RENDER_SCALE` so the launcher offers its existing Render scale control. Other builds receive no fixed-address hook. This is a deliberate game rendering option whose scale calculation lives in the game binary. It uses the existing shader libraries.
+
+Validation on the M1 Pro exercised the original cap at 50% on the house-to-Kokiri Forest route. The isolated stub additionally preserves the source SIMD register, checked by ARM64 execution across caps, game-selected scales and condition flags. The test also checks the launcher setting against rewritten metadata. Sustained frame-rate gains, later areas and iOS remain unmeasured for this isolated change.
+
 ## Files
 
 One [NUP container](../../../docs/development.md#the-packing-script-in-detail) of 25.6 GB: `scripts/pack_nup.py` unpacks it to `extract/v131072/`. The RomFS keeps most files as zstd with dictionaries from `Pack/ZsDic.pack.zs`. The movies are AV1.
@@ -95,6 +103,7 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 - [A control section's words read as a BAHS entry](../../../docs/reference/shaders.md#a-control-sections-words-read-as-a-bahs-entry): six map rows that were no shaders, one of them failing the build; `tera_common` gave its variation pairs once its row was gone.
 - [Freeing a memory pool during a texture ID walk](../../../docs/reference/nvn-objects.md#freeing-a-memory-pool-during-a-texture-id-walk): the `-[NvPkg buffer]: unrecognized selector` crash after a save or a scene change.
 - [HMMA chains keep their matrices in the SIMD-group](../../../docs/reference/shaders.md#hmma-chains-keep-their-matrices-in-the-simd-group): the NDVE movie networks behind the title and the opening, 14.8 → 11.4 ms of compute a frame on this M6.
+- [A dynamic-resolution ceiling set after the game chooses its scale](../../../docs/reference/rendering.md#a-dynamic-resolution-ceiling-set-after-the-game-chooses-its-scale): the optional v131072 host scale cap.
 - [Raw global memory lookups that start from their last entry](../../../docs/reference/shaders.md#raw-global-memory-lookups-that-start-from-their-last-entry): the foliage, vertex and compute shaders read structures word by word through loaded addresses; about 2 ms less GPU a frame at the spawn point.
 - [The GPU idles with the next command buffer already committed](../../../docs/reference/frame-rate.md#the-gpu-idles-with-the-next-command-buffer-already-committed): the 25-40 ms frames.
 - [The 30 Hz display link in fullscreen on a fixed-rate screen](../../../docs/reference/frame-rate.md#the-30-hz-display-link-in-fullscreen-on-a-fixed-rate-screen): 66.7 ms frames at a 30 fps cap in fullscreen on a MacBook Air M4, with the frame-delta change that applies the cap.
