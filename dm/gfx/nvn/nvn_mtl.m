@@ -3,13 +3,6 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <QuartzCore/CAMetalDisplayLink.h>
 #import <MetalFX/MetalFX.h>
-// Xcode 26's headers do not declare these public macOS/iOS 27 setters. Calls remain under the OS 27 availability check below; this declaration only lets an older SDK build the host.
-@protocol DmTemporalScalerOffsets <NSObject>
-@property (nonatomic) NSUInteger colorContentOffsetX, colorContentOffsetY;
-@property (nonatomic) NSUInteger depthContentOffsetX, depthContentOffsetY;
-@property (nonatomic) NSUInteger motionContentOffsetX, motionContentOffsetY;
-@property (nonatomic) NSUInteger outputOffsetX, outputOffsetY;
-@end
 #undef I   // MetalFX brings in <complex.h>, whose I (the imaginary unit) would shadow the local tables named I below
 #import <ImageIO/ImageIO.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
@@ -550,9 +543,8 @@ static want_list g_bf_want = {"DM_NVN_BF_WANT", PTHREAD_MUTEX_INITIALIZER}, g_du
 void bf_want_note(const char *key) { want_note(&g_bf_want, key); }
 
 // ---------- Memory pools ----------
-typedef struct { uintptr_t lo, hi; uintptr_t base; __unsafe_unretained id<MTLBuffer> buf; uint64_t gpu; const void *key; int res; uint64_t born; uintptr_t end; uint64_t unk; int raw; uint32_t n_tex_reads, n_other; } pool_ent;   // res: already in the residency set (on demand, see pool_res); born: when it was added (ns); end, unk: a large pool's chunk (see BIG_MIN); raw: the game has exposed a GPU address in it (pool_raw), so the pool table lists it and makes it resident; n_tex_reads / n_other: lookups by texture uploads / by anything else (mem_census)
+typedef struct { uintptr_t lo, hi; uintptr_t base; __unsafe_unretained id<MTLBuffer> buf; uint64_t gpu; const void *key; int res; uint64_t born; uintptr_t end; uint64_t unk; uint32_t n_tex_reads, n_other; } pool_ent;   // res: already in the residency set (on demand, see pool_res); born: when it was added (ns); end, unk: a large pool's chunk (see BIG_MIN); n_tex_reads / n_other: lookups by texture uploads / by anything else (mem_census)
 static pool_ent *g_pools; static int g_npool, g_cap;
-static id<MTLBuffer> pool_buf(uintptr_t a, uintptr_t b);   // a pool's zero-copy buffer over [a, b), made over writable pages (beside the GPU-written storage spans below)
 static int g_pidx_ok, g_plast = -1;   // whether the address→pool index is valid, the last hit (pool_find)
 static NSMutableArray *g_keep;                  // Holds the buffer references (pool_ent has non-owning pointers)
 static uint64_t g_pool_adds;
@@ -823,9 +815,7 @@ void mtl_pool_addressed(const void *mem, uint64_t size) {
 // (they measured on a 17 Pro Max a 512 MB render-target pool addressed 0 times in a run, with about 530 MB more device wired memory; a 4 GB A14 was ended by the system within seconds of launch because of it).
 // So a pool is not put into the residency set when created; it is put in, and the residency set committed on the spot, the first time the GPU gets its address through mtl_addr / mtl_gpu_addr -- these are the only two ways the GPU gets pool addresses,
 // and committing on the spot is earlier than any command buffer commit that uses it. CPU-side reads of pool contents through mtl_addr trigger it too (conservative, never misses). Caller holds g_mu
-static void pool_raw(int i);
 static void pool_res(int i) {
-    pool_raw(i);
     if (g_pools[i].res) return;
     res_add(g_pools[i].buf); res_commit(); g_pools[i].res = 1; g_pool_res_n++;
 }
@@ -836,36 +826,9 @@ static void pool_res(int i) {
 // pools' buffers do at shared pages; GPU addresses are not contiguous across them, so a lookup must say how far it reads. One that does not know (length 1: an indirect draw's index buffer, a raw storage
 // address) gets BIG_UNKNOWN past its address. Raw global memory, whose pool table the shader walks by itself, takes the whole pool: big_full
 enum { BIG_MIN = 512u << 20, BIG_S = 16u << 20, BIG_UNKNOWN = 64u << 20, BIG_MAX = 32 };
-typedef struct { uintptr_t lo, hi, a, b; const void *mem; int *chunk, full, raw; NSMutableArray *old; } big_pool;   // chunk: stride → g_pools index + 1; full: the whole pool's entry + 1; old: buffers a longer chunk replaced, alive with the pool
+typedef struct { uintptr_t lo, hi, a, b; const void *mem; int *chunk, full; NSMutableArray *old; } big_pool;   // chunk: stride → g_pools index + 1; full: the whole pool's entry + 1; old: buffers a longer chunk replaced, alive with the pool
 static big_pool g_big[BIG_MAX]; static int g_nbig;
-// A pool becomes reachable by raw guest pointers when NVN issues its GPU address,
-// creates a buffer in it, or an explicit GPU binding resolves its address. Merely
-// keeping a texture's tiled CPU bytes does not make that pool a shader pointer.
-static void pool_raw(int i) {   // g_mu held
-    if (g_pools[i].raw) return;
-    g_pools[i].raw = 1;
-    for (int k = 0; k < g_nbig; k++) if (g_big[k].mem == g_pools[i].key) g_big[k].raw = 1;
-    atomic_fetch_add(&g_pool_gen, 1);
-}
-void mtl_pool_expose(const void *mem, uint64_t size) {
-    uintptr_t lo = (uintptr_t)mem;
-    if (!size || size > UINTPTR_MAX - lo) return;
-    uintptr_t hi = lo + size;
-    pthread_mutex_lock(&g_mu);
-    // A bounded cache, invalidated by the pool generation (including reuse and
-    // virtual remaps), keeps repeated NVN address getters out of the pool walk.
-    static struct { uintptr_t lo, hi; uint64_t gen; } cache[64];
-    unsigned ci = (unsigned)((lo >> 14) ^ (size >> 14)) & 63;
-    uint64_t gen = atomic_load(&g_pool_gen);
-    if (cache[ci].lo == lo && cache[ci].hi == hi && cache[ci].gen == gen) { pthread_mutex_unlock(&g_mu); return; }
-    for (int k = 0; k < g_nbig; k++) if (g_big[k].lo >= lo && g_big[k].hi <= hi && !g_big[k].raw) {
-        g_big[k].raw = 1; atomic_fetch_add(&g_pool_gen, 1);
-    }
-    for (int i = 0; i < g_npool; i++) if (g_pools[i].lo >= lo && g_pools[i].hi <= hi) pool_raw(i);
-    cache[ci].lo = lo; cache[ci].hi = hi; cache[ci].gen = atomic_load(&g_pool_gen);
-    pthread_mutex_unlock(&g_mu);
-}
-
+static id<MTLBuffer> pool_buf(uintptr_t a, uintptr_t b);   // a pool's zero-copy buffer over [a, b), made over writable pages (beside the GPU-written storage spans below)
 static int big_of(uint64_t addr) { for (int i = 0; i < g_nbig; i++) if (addr >= g_big[i].lo && addr < g_big[i].hi) return i; return -1; }
 void mtl_pool_add(const void *mem, uint64_t size) {
     mtl_init();   // the change is recorded once the pool can be found (reg_bump below): a reader that sees the new generation sees the pool
@@ -874,7 +837,7 @@ void mtl_pool_add(const void *mem, uint64_t size) {
     static int chunks = -1; if (chunks < 0) { const char *e = getenv("DM_NVN_POOL_CHUNKS"); chunks = !e || atoi(e); }
     if (size >= BIG_MIN && chunks) {
         pthread_mutex_lock(&g_mu); int k = g_nbig < BIG_MAX ? g_nbig : -1;
-        if (k >= 0) { int *ch = calloc(((b - a) >> 24) + 1, sizeof *ch); if (!ch) MDIE("pool chunk table"); g_big[g_nbig++] = (big_pool){lo, hi, a, b, mem, ch, 0, 0, [NSMutableArray array]};
+        if (k >= 0) { int *ch = calloc(((b - a) >> 24) + 1, sizeof *ch); if (!ch) MDIE("pool chunk table"); g_big[g_nbig++] = (big_pool){lo, hi, a, b, mem, ch, 0, [NSMutableArray array]};
             g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1); g_pool_adds++; atomic_fetch_add(&g_big_n, 1); }
         pthread_mutex_unlock(&g_mu);
         if (k >= 0) { reg_bump(-1, REG_POOL); static int nl; if (nl++ < 8) MLOG("memory pool %p+%llu MB: in chunks, wired as far as lookups reach", mem, (unsigned long long)(size >> 20)); return; }
@@ -959,29 +922,9 @@ static int big_new(big_pool *b, uintptr_t lo, uintptr_t hi, uintptr_t end, uint6
     if (!buf) { MLOG("[RED] memory pool %p: the zero-copy buffer over %#lx..%#lx was refused", b->mem, (unsigned long)lo, (unsigned long)end); return -1; }
     if (g_npool == g_cap) { g_cap = g_cap ? g_cap * 2 : 64; g_pools = realloc_or_die(g_pools, g_cap * sizeof *g_pools, "the memory pool table"); }
     g_pidx_ok = 0; atomic_fetch_add(&g_pool_gen, 1);
-    g_pools[g_npool++] = (pool_ent){lo < b->lo ? b->lo : lo, hi > b->hi ? b->hi : hi, lo, buf, buf.gpuAddress, b->mem, 0, clock_gettime_nsec_np(CLOCK_MONOTONIC), end > b->hi ? b->hi : end, unk, b->raw};
+    g_pools[g_npool++] = (pool_ent){lo < b->lo ? b->lo : lo, hi > b->hi ? b->hi : hi, lo, buf, buf.gpuAddress, b->mem, 0, clock_gettime_nsec_np(CLOCK_MONOTONIC), end > b->hi ? b->hi : end, unk};
     [g_keep addObject:buf];
     return g_npool - 1;
-}
-// Once raw-address shaders need a whole-pool mapping, chunks and their older
-// replacements are redundant. Retire them after the submissions using them finish.
-static void big_full(big_pool *b) {   // caller holds g_mu
-    if (b->full) return;
-    int full = big_new(b, b->a, b->b, b->b, 0);
-    if (full < 0) return;
-    b->full = full + 1;
-    for (int i = 0; i < g_npool;) {
-        pool_ent *p = &g_pools[i];
-        if (p->key != b->mem || i == b->full - 1) { i++; continue; }
-        [g_keep removeObject:p->buf]; defer_obj_release(p->buf);
-        if (p->res) g_pool_res_n--;
-        g_pools[i] = g_pools[--g_npool];
-        if (i < g_npool) big_moved(i);
-    }
-    for (id<MTLBuffer> old in b->old) defer_obj_release(old);
-    [b->old removeAllObjects];
-    memset(b->chunk, 0, (((b->b - b->a) >> 24) + 1) * sizeof *b->chunk);
-    g_plast = -1; g_pidx_ok = 0;
 }
 // The entry of a large pool for [addr, addr + len): the chunk of its stride, made or lengthened to reach as far as asked; -1 past the pool's end
 static int big_lookup(big_pool *b, uint64_t addr, uint64_t len) {
@@ -2856,7 +2799,7 @@ static void pkg_absorb_take(NvPkg *pk, const tex_t *t) {
 // not say which images a shader will use atomically
 static inline int pf_r32i(MTLPixelFormat pf) { return pf == MTLPixelFormatR32Uint || pf == MTLPixelFormatR32Sint; }
 static MTLTextureUsage img_usage(const tex_t *t, MTLPixelFormat pf) {
-    if (!(t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) || fmt_compressed(t->d.format)) return 0;   // block encoders write uncompressed aliases
+    if (!(t->d.flags & NVN_TEXTURE_FLAGS_IMAGE)) return 0;
     return MTLTextureUsageShaderWrite | (pf_r32i(pf) ? MTLTextureUsageShaderAtomic : 0);
 }
 // Metal leaves MTLTextureUsageShaderAtomic out of a texture's usage property (0x3 for a texture made with 0x23), so it cannot be read back: every shader-writable R32Uint / R32Sint
@@ -6506,22 +6449,7 @@ void mtl_set_origin_lower_left(int on) { if (atomic_exchange(&g_origin_ll, on) !
 static int g_queue_origin_ll;   // SET_WINDOW_ORIGIN's raster flip is queue state, independent of later device-origin changes.
 void mtl_set_queue_origin_lower_left(int on) { g_queue_origin_ll = on != 0; }
 void mtl_set_tex_pool_n(int n) { g_tpool_n = n; }
-// A pool walk may reach stale registered descriptors after their object was finalized and
-// their storage reused. It must not recreate zero-filled GPU textures for those IDs:
-// creation takes over aliases, invalidates the whole table, and the next walk repeats it.
-// Existing backing, CPU uploads, live objects and command-record snapshots still resolve.
-static id<MTLTexture> treg_tex(const treg_t *r) {   // Caller holds g_rmu
-    if (r->gone) return tex_made(&r->t);
-    if (r->retired && !tex_made(&r->t) && !tex_from_storage(&r->t) && !tex_cpu_content(&r->t)) {
-        alias_key k; memset(&k, 0, sizeof k); k.pool = (uint64_t)(uintptr_t)r->t.pool; k.off = r->t.off; k.d = r->t.d; k.d.flags &= ~NVN_TEXTURE_FLAGS_IMAGE;
-        pthread_mutex_lock(&g_smu); int held = nvn_hm_get(&g_alias, &k) != NULL;
-        const uint8_t *twins = srgb_twins(k.d.format);
-        for (int i = 0; !held && i < 4 && twins[i]; i++) { k.d.format = twins[i]; held = nvn_hm_get(&g_alias, &k) != NULL; }
-        pthread_mutex_unlock(&g_smu);
-        if (!held) return nil;
-    }
-    return tex_mtl(&r->t);
-}
+static id<MTLTexture> treg_tex(const treg_t *r) { return r->gone ? tex_made(&r->t) : tex_mtl(&r->t); }   // Caller holds g_rmu
 // The upload stamp of the packaged texture an ID's view was made from (tex_by_id's guest-write shortcut); none for sparse ones (their page table changes too) or another base. Caller holds g_rmu
 static void treg_pkg_stamp(treg_t *rp, id<MTLTexture> base) {
     rp->view_span = NULL; if (!rp->view_pkg) return;
@@ -9408,27 +9336,7 @@ static int tex_storage_live(const tex_t *t) {
     const pool_t *p = t->pool;
     if (p && p->magic != MAGIC('P', 'O', 'O', 'L')) return 0;
     if (p && nvn_sparse_pool(p)) return 1;
-    uint64_t addr = (uint64_t)(uintptr_t)t->mem, len = t->L.size ? t->L.size : 1;
-    // Checking CPU-readable storage must not create a Metal mapping or make it resident.
-    // The old mtl_addr call wired every pool visited by a bindless descriptor scan.
-    if (p) { uint64_t base = (uint64_t)(uintptr_t)p->mem; return addr >= base && len <= p->size && addr - base <= p->size - len; }
-    int found = 0;
-    pthread_mutex_lock(&g_mu);
-    for (int i = 0; i < g_npool && !found; i++) { const pool_ent *e = &g_pools[i]; found = addr >= e->lo && addr <= e->hi && len <= e->hi - addr; }
-    for (int i = 0; i < g_nbig && !found; i++) { const big_pool *e = &g_big[i]; found = addr >= e->lo && addr <= e->hi && len <= e->hi - addr; }
-    pthread_mutex_unlock(&g_mu);
-    return found;
-}
-// Cube storage is a 2D array in this backend. It must remain eligible for the
-// 2D-array handle table (probe analysis reads cube faces that way).
-static int ttype_class(long t) { return (t >= 0 && t <= 3) || t == 5 || t == 6 ? 0 : t == 4 || t == 8 ? 1 : t == 7 ? 3 : -1; }
-// A bindless pool of one texture class cannot reach another. Reject those IDs
-// before resolving their storage: otherwise a cube-only draw uploads every 2D
-// texture too. Keep compatible dimensional reinterpretations and explicit views.
-static int ttype_apart(const treg_t *r, int dtt) {
-    int target = r->has_v && r->v.set_target ? r->v.target : r->t.d.target;
-    int a = ttype_class((long)ttype(target, -1)), b = ttype_class(dtt);
-    return a >= 0 && b >= 0 && a != b;
+    return mtl_addr_known((uint64_t)(uintptr_t)t->mem, t->L.size ? t->L.size : 1);
 }
 // A handle read from game memory may name any registered texture, and on the console that costs nothing: the data is in the pool, and a handle is a number. Here each is a Metal texture beside the
 // pool's copy, and making them all took Ocarina of Time's Kokiri Forest past Metal's 12.1 GB working set on a 16 GB Mac, once into a kernel panic in IOGPUGroupMemory at 14.7 GB wired. Shaders read few of
@@ -9438,9 +9346,9 @@ static int ttype_apart(const treg_t *r, int dtt) {
 // in residency commits. A read of the rest finds the dummy for a few frames
 enum { POOL_FRAME_BYTES = 32u << 20, POOL_REQ_BYTES = 128u << 20, POOL_SUB_MS = 2 };
 static uint64_t g_walk_frame = ~0ull, g_walk_spent, g_walk_sub = ~0ull; static double g_walk_ms; static int g_walk_over;
+static int pool_skip_retired(void);
 static uint64_t pool_tex_size(const tex_t *t) { return t->L.size ? t->L.size : 1; }
 static int pool_size_cmp(const void *a, const void *b) { uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b; return x < y ? -1 : x > y; }
-static int pool_skip_retired(void);   // DM_NVN_POOL_SKIP_RETIRED / the profile key: retired texture IDs without a view take the dummy in a pool table
 // DM_POOL_BUDGET_MB: make textures up front while the residency set is under this size. Without it, a twentieth of the working set against the device's allocated size, which counts each no-copy buffer in full, so a game with many pools has no room
 static uint64_t pool_budget_mb(void) { static int64_t v = -1; if (v < 0) { const char *e = getenv("DM_POOL_BUDGET_MB"); v = e ? atoll(e) : 0; if (v < 0) v = 0; } return (uint64_t)v; }
 static uint64_t pool_budget(void) { uint64_t mb = pool_budget_mb(); return mb ? mb << 20 : g_dev.recommendedMaxWorkingSetSize / 20; }
@@ -9651,12 +9559,9 @@ static uint64_t pool_gpu(int samp, int dtt, int dpf, int base, __unsafe_unretain
     int real = 0, gone = 0, left = 0, left_req = 0, skipped = 0; uint64_t limit = samp ? UINT64_MAX : pool_walk_limit(base, n);
     pool_ids nd = {0}, nt = {0}; ids_begin(0); ids_begin(1);
     for (int i = 0; i < n; i++) {
-        int id_ = base + i; uint64_t r = 0;
-        if (id_ <= 0) {}
-        else if (samp) { if (g_sreg_ok[id_] && samp_fast(id_)) r = g_srid[id_]; }
-        else if (g_treg[id_].ok && ttype_apart(&g_treg[id_], dtt)) {}
-        else if (g_treg[id_].ok && (g_treg[id_].gone || (!g_treg[id_].view && !tex_storage_live(&g_treg[id_].t)))) gone++;
-        else if (g_treg[id_].ok) { void *tv = NULL; uint64_t tr = tex_fast_rid(id_, &tv); if (tv && ((__bridge id<MTLTexture>)tv).textureType == (MTLTextureType)dtt) r = tr; }
+        int d = 0, t = 0; uint64_t r = pool_entry(samp, dtt, base + i, limit, &gone, &left, &left_req, &t, &d, &skipped);
+        if (d) ids_add(0, &nd, base + i);
+        if (t) ids_add(1, &nt, base + i);
         e[i] = r ? r : dummy; real += r != 0;
     }
     e[n] = dummy;
@@ -9826,7 +9731,7 @@ static uint64_t support_gpu(void) { static uint64_t gpu; if (!gpu) gpu = support
 // stores dropped, the terrain's walls and floor were never drawn (instance count 0) and the counts grew frame after frame.
 // Layout (dmsh_abi.h DMSH_GMEM_MAP_*): sorted by start, entry 0 empty, then the pools as disjoint ranges (a pool overlapping an earlier one keeps only its part past that one's end: every
 // pool wraps the guest's own pages, so any pool holding an address gives its GPU address), unused entries starting at ~0. Rebuilt when the pools change; the replaced table goes through
-// deferred release, so submissions encoded with it keep it. Table entries and capacity are unchanged; only GPU-exposed pools become resident. CPU-only texture storage is not pinned just to list its address
+// deferred release, so submissions encoded with it keep it. Only pools something gave an address in are listed (mtl_pool_addressed), each made resident, as the shader may reach any of them
 static id<MTLBuffer> g_gmem_buf; static uint64_t g_gmem_gen;
 static id<MTLBuffer> gmem_map(void) {
     uint64_t gen = atomic_load(&g_pool_gen);
@@ -9836,11 +9741,12 @@ static id<MTLBuffer> gmem_map(void) {
     for (int k = 1; k < DMSH_GMEM_MAP_ENTRIES; k++) memset(t + (size_t)k * DMSH_GMEM_MAP_ENTRY, 0xff, 8);
     int n = 1, over = 0; uint64_t end = 0;
     pthread_mutex_lock(&g_mu);
-    for (int k = 0; k < g_nbig; k++) big_full(&g_big[k]);   // the pool table reaches all of a large pool
+    for (int k = 0; k < g_nbig; k++) if (!g_big[k].full && addr_meets(g_big[k].lo, g_big[k].hi)) { int n = big_new(&g_big[k], g_big[k].a, g_big[k].b, g_big[k].b, 0); if (n >= 0) g_big[k].full = n + 1; }   // the pool table reaches all of a large pool
     gen = atomic_load(&g_pool_gen); pidx_sort();
     for (int k = 0; k < g_npool; k++) {
         pool_ent *p = &g_pools[g_pidx[k]];
-        if (p->raw && !p->res) { res_add(p->buf); p->res = 1; g_pool_res_n++; }
+        if (!addr_meets(p->lo, p->hi)) continue;
+        if (!p->res) { res_add(p->buf); p->res = 1; g_pool_res_n++; }
         uint64_t lo = MAX((uint64_t)p->lo, end), hi = p->hi;
         if (lo >= hi) continue;
         if (n == DMSH_GMEM_MAP_ENTRIES) { over++; continue; }
@@ -14051,11 +13957,10 @@ static void dlss_eval(const p_dlss *c) {
         sc.colorTexture = col; sc.depthTexture = dep; sc.motionTexture = mot; sc.outputTexture = out; sc.exposureTexture = expo;
         sc.inputContentWidth = iw; sc.inputContentHeight = ih;
         if (@available(macOS 27.0, iOS 27.0, *)) {   // the rectangles' corners: all at the origin on the game seen, so an older system loses nothing there
-            id<DmTemporalScalerOffsets> offsets = (id)sc;
-            offsets.colorContentOffsetX = (NSUInteger)a.base[DLSS_COLOR][0]; offsets.colorContentOffsetY = (NSUInteger)a.base[DLSS_COLOR][1];
-            offsets.depthContentOffsetX = (NSUInteger)a.base[DLSS_DEPTH][0]; offsets.depthContentOffsetY = (NSUInteger)a.base[DLSS_DEPTH][1];
-            offsets.motionContentOffsetX = (NSUInteger)a.base[DLSS_MOTION][0]; offsets.motionContentOffsetY = (NSUInteger)a.base[DLSS_MOTION][1];
-            offsets.outputOffsetX = (NSUInteger)a.base[DLSS_OUTPUT][0]; offsets.outputOffsetY = (NSUInteger)a.base[DLSS_OUTPUT][1];
+            sc.colorContentOffsetX = (NSUInteger)a.base[DLSS_COLOR][0]; sc.colorContentOffsetY = (NSUInteger)a.base[DLSS_COLOR][1];
+            sc.depthContentOffsetX = (NSUInteger)a.base[DLSS_DEPTH][0]; sc.depthContentOffsetY = (NSUInteger)a.base[DLSS_DEPTH][1];
+            sc.motionContentOffsetX = (NSUInteger)a.base[DLSS_MOTION][0]; sc.motionContentOffsetY = (NSUInteger)a.base[DLSS_MOTION][1];
+            sc.outputOffsetX = (NSUInteger)a.base[DLSS_OUTPUT][0]; sc.outputOffsetY = (NSUInteger)a.base[DLSS_OUTPUT][1];
         }
         sc.motionVectorScaleX = a.mv[0]; sc.motionVectorScaleY = a.mv[1];
         sc.jitterOffsetX = a.jitter[0]; sc.jitterOffsetY = a.jitter[1];
