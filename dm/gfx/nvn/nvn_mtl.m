@@ -1323,10 +1323,12 @@ static inline void m4_end(id e) {
     if ([e conformsToProtocol:@protocol(MTL4CommandEncoder)]) [(id<MTL4CommandEncoder>)e barrierAfterStages:MTLStageAll beforeQueueStages:MTLStageAll visibilityOptions:vis];
     [e endEncoding]; g_last_end_relaxed = 0; cm_enc_mark(-1);
 }
-// DM_NVN_BARRIER=game (default the profile's draw_barriers, full unless it says game): draw passes are ordered by the game's own barriers. A draw pass ends with a barrier from its vertex and fragment stages to the fragment, compute and copy stages of
-// later work, so the next pass's vertex work can overlap this pass's fragments (with the full barriers every pass waited for the previous one to finish completely: about 350 passes a frame in Breath of
-// the Wild). The next draw pass adds the full consumer barrier when the game called nvnCommandBufferBarrier since the last one (NVN asks for one before results of rendering are read as textures, shader data or
-// indirect arguments), or when anything other than a draw pass ran in between (compute, copies and uploads keep their full barriers). Only vertex-stage reads of the previous pass's results without a barrier change order
+// DM_NVN_BARRIER=game (default the profile's draw_barriers, full unless it says game): draw passes are ordered by the game's own barriers. A draw pass ends with a barrier from
+// its vertex, object, mesh and fragment stages to the object, mesh, fragment, compute and copy stages of later work, so the next pass's vertex work can overlap this pass's fragments
+// (with the full barriers every pass waited for the previous one to finish completely: about 350 passes a frame in Breath of the Wild). Object and mesh are listed apart from vertex:
+// without them the next pass's task and mesh shaders started before this pass's fragments were done (t_pass_end_stages). The next draw pass adds the full consumer barrier when the
+// game called nvnCommandBufferBarrier since the last one (NVN asks for one before results of rendering are read as textures, shader data or indirect arguments), or when anything
+// other than a draw pass ran in between (compute, copies and uploads keep their full barriers). Only vertex-stage accesses of the previous pass's results without a barrier change order
 // DM_NVN_BARRIER=ab... alternates game and full with the DM_AB phases (measurement)
 static int sw_mode(const char *name, int dflt); static inline int sw_on(int m);
 static int barrier_game(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_BARRIER"); v = e && !strncmp(e, "ab", 2) ? sw_mode("DM_NVN_BARRIER", 0) : e ? !strcmp(e, "game") : DM_GAME_DRAW_BARRIERS_GAME; if (v == 1) MLOG("DM_NVN_BARRIER=game: draw passes are ordered by the game's own barriers (fragment work still has barriers between passes; vertex work may overlap the previous pass's fragments)"); } return sw_on(v); }
@@ -1418,7 +1420,7 @@ static inline id<MTL4RenderCommandEncoder> enc_r_begin_pass(MTL4RenderPassDescri
 }
 static inline void enc_r_end_pass(id e) {
     if (!barrier_game() || g_image_heap_n) { m4_end(e); return; }
-    gp_end(e); [(id<MTL4CommandEncoder>)e barrierAfterStages:MTLStageVertex | MTLStageMesh | MTLStageFragment beforeQueueStages:MTLStageFragment | MTLStageDispatch | MTLStageBlit visibilityOptions:resource_vis()];
+    gp_end(e); [(id<MTL4CommandEncoder>)e barrierAfterStages:MTLStageVertex | MTLStageObject | MTLStageMesh | MTLStageFragment beforeQueueStages:MTLStageObject | MTLStageMesh | MTLStageFragment | MTLStageDispatch | MTLStageBlit visibilityOptions:resource_vis()];
     [e endEncoding]; g_last_end_relaxed = 1;
 }
 static inline id<MTL4RenderCommandEncoder> enc_r_begin(MTL4RenderPassDescriptor *d) { g_cm_enc++; cm_enc_mark(2); id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d]; cm_enc_mark(0); [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; [e setArgumentTable:g_vt atStages:MTLRenderStageVertex]; [e setArgumentTable:g_ft atStages:MTLRenderStageFragment]; gp_begin(e, 'R', d); return e; }
@@ -5529,6 +5531,29 @@ static os_unfair_lock g_fn_dev_lock = OS_UNFAIR_LOCK_INIT;
 @interface FnDev : NSObject { @public id<MTLFunction> fn; } @end
 @implementation FnDev @end
 static NSMapTable *g_fn_dev;   // a function fn_spec left unspecialized → its stable specialization record (fn filled by fn_dev)
+// Metal compiler workarounds (dm/gfx/tools/dmsh_metalwa.py, profile shader_metalwa): the KK_WORKAROUND_3 ballot rewrite is behind the function constant DMSH_MWA_FC, on by default.
+// The GPU compiler of macOS 15.4 to 26 speculates a ballot out of its branch (KosmicKrisp's FB20113490); macOS 27's does not, so there the rewrite is turned off and the shaders
+// take simd_ballot as built. iOS keeps the default (its compiler is not checked). DM_NVN_METALWA=0 / 1 overrides. Only shaders the profile rewrote declare the constant
+static int mwa_on(void) {
+    static int v; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *e = getenv("DM_NVN_METALWA"); int on = 1;
+#if !TARGET_OS_IPHONE
+        on = ![[NSProcessInfo processInfo] isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion){27, 0, 0}];
+#endif
+        if (e && *e) on = strcmp(e, "0") != 0;
+        if (!on || (e && *e)) MLOG("Metal compiler workaround KK3 (profile shader_metalwa): %s (%s)", on ? "on" : "off", e && *e ? "DM_NVN_METALWA" : "macOS 27 or later");
+        v = on;
+    });
+    return v;
+}
+// A new set of function constant values for a game's shader: empty but for DMSH_MWA_FC where mwa_on turns it off. Every place that specializes a game's shader takes its set from
+// here, shader_load and the prewarm's descriptors (pre_fn) alike, so a pipeline is looked up as it was captured
+static MTLFunctionConstantValues *fc_values(void) {
+    MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
+    if (!mwa_on()) { bool off = false; [cv setConstantValue:&off type:MTLDataTypeBool atIndex:DMSH_MWA_FC]; }
+    return cv;
+}
 static id<MTLFunction> fn_lib_spec(id<MTLLibrary> lib, NSString *name, MTLFunctionConstantValues *cv, NSError **e) {
     if (!lib || !name || !cv) return nil;
     return fn4_note([lib newFunctionWithName:name constantValues:cv error:e], lib, name, cv);
@@ -5597,7 +5622,7 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
                o->mesh_notask = o->mesh_kind == 2 && ![mst[@"task"] boolValue];
                if (o->mesh_kind == 2 && atomic_load(&g_depth_zero) && j[@"entry_z"]) entry = j[@"entry_z"]; }   // the depth convention, as a vertex shader takes it above
     if (j[@"entry_geometry_capture"]) {
-        NSError *ge = nil; MTLFunctionConstantValues *gcv = [MTLFunctionConstantValues new];
+        NSError *ge = nil; MTLFunctionConstantValues *gcv = fc_values();
         o->geo_fn = fn_spec(lib, j[@"entry_geometry_capture"], gcv, &ge);
         if (!o->geo_fn) MLOG("[RED] vertex shader %s: geometry capture entry failed: %s", pc.UTF8String, ge.localizedDescription.UTF8String);
     }
@@ -5624,7 +5649,7 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     if (j[@"entry_discard"]) {
         o->discard_fn = fn4_note([lib newFunctionWithName:j[@"entry_discard"]], lib, j[@"entry_discard"], nil);
         if (o->discard_fn.functionConstantsDictionary.count) {
-            MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new]; NSError *error = nil;
+            MTLFunctionConstantValues *cv = fc_values(); NSError *error = nil;
             o->discard_fn = fn_spec(lib, j[@"entry_discard"], cv, &error);
         }
         if (!o->discard_fn) MLOG("[RED] shader %s: no rasterizer-discard entry point %s in its library", pc.UTF8String, [j[@"entry_discard"] UTF8String]);
@@ -5639,7 +5664,7 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
         if (!o->fn_m) MLOG("[RED] shader %s: no mixed integer-output entry point %s in its library", pc.UTF8String, [j[@"entry_m"] UTF8String]); }
     if (stage == 1 && j[@"entry_d"]) { o->fn_d = fn4_note([lib newFunctionWithName:j[@"entry_d"]], lib, j[@"entry_d"], nil); if (!o->fn_d) MLOG("[RED] shader %s: no dual-source entry point %s in its library", pc.UTF8String, [j[@"entry_d"] UTF8String]); }
     if (o->fn.functionConstantsDictionary.count) {   // a compute shader with constants has MTLDevice pipelines (cps_new): it is specialized through its library (fn_spec otherwise)
-        NSError *fe = nil; MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new]; id<MTLFunction> (*spec)(id<MTLLibrary>, NSString *, MTLFunctionConstantValues *, NSError **) = stage == 5 ? fn_lib_spec : fn_spec;
+        NSError *fe = nil; MTLFunctionConstantValues *cv = fc_values(); id<MTLFunction> (*spec)(id<MTLLibrary>, NSString *, MTLFunctionConstantValues *, NSError **) = stage == 5 ? fn_lib_spec : fn_spec;
         id<MTLFunction> f = spec(lib, entry, cv, &fe);
         if (f) o->fn = f; else MLOG("[RED] shader %s: specializing its function constants failed: %s", pc.UTF8String, fe.localizedDescription.UTF8String);
         if (o->fn_u) o->fn_u = spec(lib, j[@"entry_u"], cv, &fe);
@@ -7011,7 +7036,7 @@ static id<MTLFunction> vin_fn(NvShader *vs) {   // the shadow-input entry point,
         vs->vfn_state = 2;
         size_t kl = strlen(vs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bv.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), vs->key];
         NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); id<MTLFunction> f = lib && vs->ventry ? fn4_note([lib newFunctionWithName:vs->ventry], lib, vs->ventry, nil) : nil;
-        if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, vs->ventry, [MTLFunctionConstantValues new], &e);   // as shader_load
+        if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, vs->ventry, fc_values(), &e);   // as shader_load
         const char *why = !lib ? "no library" : !f ? "no entry point" : NULL;
         if (f && vs->rf.nb && [f newArgumentEncoderWithBufferIndex:vs->rf.abi].encodedLength != vs->arg_len) { why = "its argument buffer differs from the base library's"; f = nil; }
         if (f) { vs->vfn = f; vs->vfn_state = 1; g_vin_loaded++; }
@@ -7030,7 +7055,7 @@ static void pull_load(NvShader *vs) {
         vs->pfn_state = 2;
         size_t kl = strlen(vs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bp.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), vs->key];
         NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); id<MTLFunction> f = lib && vs->ventry ? fn4_note([lib newFunctionWithName:vs->ventry], lib, vs->ventry, nil) : nil;
-        if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, vs->ventry, [MTLFunctionConstantValues new], &e);
+        if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, vs->ventry, fc_values(), &e);
         const char *why = !lib ? "no library" : !f ? "no entry point" : NULL;
         if (f && vs->rf.nb && [f newArgumentEncoderWithBufferIndex:vs->rf.abi].encodedLength != vs->arg_len) { why = "its argument buffer differs from the base library's"; f = nil; }
         if (f) { vs->pfn = f; vs->pfn_state = 1; }
@@ -7340,7 +7365,7 @@ static id<MTLFunction> at_fn(NvShader *fs, id<MTLFunction> base) {   // the side
         for (int i = 0; i < 4 && !why; i++) {
             if (!own[i]) continue;
             NSString *name = [own[i].name stringByAppendingString:@"_a"]; id<MTLFunction> f = fn4_note([lib newFunctionWithName:name], lib, name, nil);
-            if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, name, [MTLFunctionConstantValues new], &e);   // as shader_load
+            if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, name, fc_values(), &e);   // as shader_load
             if (!f) why = "no entry point";
             else if (fs->rf.nb && [f newArgumentEncoderWithBufferIndex:fs->rf.abi].encodedLength != fs->arg_len) why = "its argument buffer differs from the base library's";
             else fs->afn[i] = f;
@@ -7426,7 +7451,7 @@ static id<MTLFunction> lo_fn(NvShader *fs, id<MTLFunction> base, uint32_t target
     }
     id<MTLFunction> f = nil; NSNumber *k = @(w << 8 | (targets & 0xff));
     if (fs->lfn_state == 1 && !(f = fs->lfn[k])) {
-        MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
+        MTLFunctionConstantValues *cv = fc_values();
         for (int n = 0; n < 8; n++) { bool on = targets >> n & 1; [cv setConstantValue:&on type:MTLDataTypeBool atIndex:DMSH_LOGIC_FC + n]; }
         NSString *name = [base.name stringByAppendingString:@"_l"];
         f = fn4_note([fs->llib newFunctionWithName:name constantValues:cv error:&e], fs->llib, name, cv);
@@ -8338,11 +8363,11 @@ static NSDictionary<NSString *, NSString *> *pre_fail_load(NSString *path, NSStr
     if ([head isEqualToString:pre_fail_head(want)]) return pairs;
     *other = 1; return @{};
 }
-static MTL4FunctionDescriptor *pre_fn(id<MTLLibrary> lib, NSString *name) {   // as shader_load notes them (fn4_note): constants specialized with an empty set
+static MTL4FunctionDescriptor *pre_fn(id<MTLLibrary> lib, NSString *name) {   // as shader_load notes them (fn4_note): constants specialized with fc_values
     id<MTLFunction> f = [lib newFunctionWithName:name]; if (!f) return nil;
     MTL4LibraryFunctionDescriptor *ld = [MTL4LibraryFunctionDescriptor new]; ld.library = lib; ld.name = name;
     if (!f.functionConstantsDictionary.count) return ld;
-    MTL4SpecializedFunctionDescriptor *sd = [MTL4SpecializedFunctionDescriptor new]; sd.functionDescriptor = ld; sd.constantValues = [MTLFunctionConstantValues new]; return sd;
+    MTL4SpecializedFunctionDescriptor *sd = [MTL4SpecializedFunctionDescriptor new]; sd.functionDescriptor = ld; sd.constantValues = fc_values(); return sd;
 }
 static NSDictionary *pre_json(NSString *key) { NSData *d = msl_data([NSString stringWithFormat:@"%@/%@_b.json", g_msl_dir, key]); return d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:nil] : nil; }
 // The base of one pair as the draws make it (pso_desc_pull / pso_desc), or nil when the pair is left to the draws. Call inside an autorelease pool
@@ -11298,7 +11323,7 @@ static id<MTLFunction> bf_fn(NvShader *fs, const int *fx, uint8_t fbmask, const 
     }
     id<MTLLibrary> lib = fs->bflib;
     if (!lib) { os_unfair_lock_unlock(&g_fz_fn_lock); return nil; }
-    MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
+    MTLFunctionConstantValues *cv = fc_values();
     for (int i = 0; i < nfc; i++) { int v = fx[i]; [cv setConstantValue:&v type:MTLDataTypeInt atIndex:(NSUInteger)i]; }
     for (int q = 0; q < 8; q++) { bool b = fbmask >> q & 1; [cv setConstantValue:&b type:MTLDataTypeBool atIndex:(NSUInteger)(32 + q)]; }
     for (int j = 0; j < fs->rf.nfo; j++) for (int q = 0; q < 8; q++) { bool b = lmap[q] == fs->rf.fo_color[j]; [cv setConstantValue:&b type:MTLDataTypeBool atIndex:(NSUInteger)(64 + 8 * j + q)]; }
@@ -13216,31 +13241,33 @@ static int fmt_int_or_ds(MTLPixelFormat f) {
         default: return 0;
     }
 }
-static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsigned ss, unsigned dl, unsigned ds, const NVNcopyRegion *sr, const NVNcopyRegion *dr, int linear, int mirror) {
-    static NSMutableDictionary<NSNumber *, id<MTLRenderPipelineState>> *pso; static id<MTLFunction> vf, ff, fd, fds; static id<MTLSamplerState> samp[2]; static id<MTL4ArgumentTable> at; static id<MTLDepthStencilState> dss, dss_s; static int failed;
+// square: each colour channel drawn as c * |c| (the upscaler swap's root-encoded input into linear colour, up_mfx_encode)
+static int copy_t2t_draw_sq(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsigned ss, unsigned dl, unsigned ds, const NVNcopyRegion *sr, const NVNcopyRegion *dr, int linear, int mirror, int square) {
+    static NSMutableDictionary<NSNumber *, id<MTLRenderPipelineState>> *pso; static id<MTLFunction> vf, ff, fq, fd, fds; static id<MTLSamplerState> samp[2]; static id<MTL4ArgumentTable> at; static id<MTLDepthStencilState> dss, dss_s; static int failed;
     if (failed || sr->width <= 0 || sr->height <= 0 || dr->width <= 0 || dr->height <= 0) return 0;
     int depth = (s.pixelFormat == MTLPixelFormatDepth32Float || s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 || s.pixelFormat == MTLPixelFormatDepth16Unorm) && d.pixelFormat == s.pixelFormat, stencil = depth && d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8;
     if (!depth && (fmt_int_or_ds(s.pixelFormat) || fmt_int_or_ds(d.pixelFormat))) return 0;
     if (mtl_fmt_block(d.pixelFormat) || !(d.usage & MTLTextureUsageRenderTarget) || s.sampleCount > 1 || d.sampleCount > 1) return 0;
     if (!pso) {
         NSError *e = nil; id<MTLLibrary> lib = host_lib("copy", &e);
-        vf = [lib newFunctionWithName:@"vs"]; ff = [lib newFunctionWithName:@"fs"]; fd = [lib newFunctionWithName:@"fsd"]; fds = [lib newFunctionWithName:@"fsds"];
+        vf = [lib newFunctionWithName:@"vs"]; ff = [lib newFunctionWithName:@"fs"]; fq = [lib newFunctionWithName:@"fsq"]; fd = [lib newFunctionWithName:@"fsd"]; fds = [lib newFunctionWithName:@"fsds"];
         MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new]; dd.depthCompareFunction = MTLCompareFunctionAlways; dd.depthWriteEnabled = YES; dss = [g_dev newDepthStencilStateWithDescriptor:dd];
         MTLStencilDescriptor *sd_ = [MTLStencilDescriptor new]; sd_.stencilCompareFunction = MTLCompareFunctionAlways; sd_.depthStencilPassOperation = MTLStencilOperationReplace;   // Replace writes the [[stencil]] output
         dd.frontFaceStencil = dd.backFaceStencil = sd_; dss_s = [g_dev newDepthStencilStateWithDescriptor:dd];
         MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxTextureBindCount = 2; ad.maxSamplerStateBindCount = 1; ad.maxBufferBindCount = 1; at = rec_table([g_dev newArgumentTableWithDescriptor:ad error:&e]);
         for (int i = 0; i < 2; i++) { MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.minFilter = sd.magFilter = i ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
             sd.sAddressMode = sd.tAddressMode = MTLSamplerAddressModeClampToEdge; sd.supportArgumentBuffers = YES; samp[i] = [g_dev newSamplerStateWithDescriptor:sd]; }
-        if (!vf || !ff || !fd || !fds || !dss || !dss_s || !at || !samp[0] || !samp[1]) { failed = 1; MLOG("[RED] cannot create the pipelines for format-converting / scaling texture copies: %s", e.localizedDescription.UTF8String); return 0; }
+        if (!vf || !ff || !fq || !fd || !fds || !dss || !dss_s || !at || !samp[0] || !samp[1]) { failed = 1; MLOG("[RED] cannot create the pipelines for format-converting / scaling texture copies: %s", e.localizedDescription.UTF8String); return 0; }
         pso = [NSMutableDictionary dictionary];
     }
     // Stencil: read through a stencil-only view of the source (one per layer below); without one it is cleared to 0
     id<MTLTexture> stv0 = stencil && s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ? [s newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8 textureType:MTLTextureType2D levels:NSMakeRange(sl, 1) slices:NSMakeRange(ss + sr->zoffset, 1)] : nil;
     int scopy = stv0 != nil;
-    NSNumber *pk = @(d.pixelFormat * 2 + scopy);
+    square = square && !depth;
+    NSNumber *pk = @((d.pixelFormat * 2 + scopy) * 2 + square);
     id<MTLRenderPipelineState> ps = pso[pk];
     if (!ps) {
-        MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new]; pd.vertexFunction = vf; pd.fragmentFunction = depth ? (scopy ? fds : fd) : ff;
+        MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new]; pd.vertexFunction = vf; pd.fragmentFunction = depth ? (scopy ? fds : fd) : square ? fq : ff;
         if (depth) { pd.depthAttachmentPixelFormat = d.pixelFormat; if (stencil) pd.stencilAttachmentPixelFormat = d.pixelFormat; } else pd.colorAttachments[0].pixelFormat = d.pixelFormat;
         NSError *e = nil; ps = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
         if (!ps) { RED_ONCE(83, "format-converting / scaling texture copy: cannot create the pipeline for destination format %lu: %s", (unsigned long)d.pixelFormat, e.localizedDescription.UTF8String); return 0; }
@@ -13277,6 +13304,9 @@ static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsign
     { static int once[2]; if (!once[depth]++) MLOG("format-converting / scaling texture copy: first case %dx%d format %lu → %dx%d format %lu%s%s", sr->width, sr->height, (unsigned long)s.pixelFormat, dr->width, dr->height, (unsigned long)d.pixelFormat,
                                                     linear && !depth ? " (bilinear)" : "", stencil ? (scopy ? " (depth + stencil)" : " (no stencil view possible, cleared to 0)") : ""); }
     return 1;
+}
+static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsigned ss, unsigned dl, unsigned ds, const NVNcopyRegion *sr, const NVNcopyRegion *dr, int linear, int mirror) {
+    return copy_t2t_draw_sq(s, d, sl, ss, dl, ds, sr, dr, linear, mirror, 0);
 }
 // nvnCommandBufferDrawTexture: the source region of a texture (texels, through the handle's sampler) drawn into the destination region of each bound colour target (pixels in the window's
 // coordinates, which are the targets' own rows in either window origin, since the host keeps the Switch's memory layout). Streets of Rage 4 draws each movie frame (the intro, the
@@ -14573,10 +14603,32 @@ static int up_mfx_on(void) {
 // Bananza's all encode linear input (0.0031308, 1 / 2.4 as floats) and come in threes: no decode at the end (the output stays encoded), a decode clamped to 0-1, a decode up to 128. Splatoon Raiders' all read colour that is encoded
 // already and come in twos: no decode, a decode clamped to 0-1 (as half floats: 0.04045, 2.4 and 1 / 12.92 rounded to 0.0404358, 2.3984375 and 0.0774536). Only the variants with linear output are drawn, in these two shapes; a variant
 // with encoded output, or any other shape (no pack has shown one), keeps the game's shader. A constant counts from 8 uses, far fewer than a curve per channel of every output tile: two bytes also match by chance
-enum { UP_COLOR_UNREAD, UP_COLOR_LINEAR, UP_COLOR_SRGB, UP_COLOR_KEEP };   // linear in and out: HDR mode; sRGB in, linear out: perceptual mode, then decoded; UP_COLOR_KEEP, UP_COLOR_UNREAD: the game's shader
+enum { UP_COLOR_UNREAD, UP_COLOR_LINEAR, UP_COLOR_SRGB, UP_COLOR_KEEP, UP_COLOR_ROOT };   // linear in and out: HDR mode; sRGB in, linear out: perceptual mode, then decoded; root-encoded in (gamma 2),
+                                                                                         // linear out: squared into linear, then HDR mode; UP_COLOR_KEEP, UP_COLOR_UNREAD: the game's shader
 static int up_mfx_uses(const void *code, size_t n, const void *v, size_t w) {
     const uint8_t *p = code, *end = p + n; int hits = 0;
     while (hits < 8 && (p = memmem(p, end - p, v, w))) { hits++; p += w; }
+    return hits == 8;
+}
+// Whether the code has a MUFU.EX2 or MUFU.LG2 (Ampere: opcode 0x108 in the low 9 bits, any form; the function at 74..79, EX2 2 and LG2 3), the instructions every power takes
+static int up_mfx_has_pow(const void *code, size_t n) {
+    for (size_t o = 0; o + 16 <= n; o += 16) {
+        uint64_t lo, hi; memcpy(&lo, (const uint8_t *)code + o, 8); memcpy(&hi, (const uint8_t *)code + o + 8, 8);
+        if ((lo & 0x1ff) == 0x108 && ((hi >> 10) & 0x3f) - 2 < 2) return 1;
+    }
+    return 0;
+}
+// Whether the code squares a value keeping its sign, from 8 times: FMUL (0x220) or HMUL2 (0x232) of a register by itself, with |x| on exactly one side (Ra 24..31, Rb 32..39; Rb's abs at 62, Ra's at 73;
+// HMUL2's lane swizzles, A 74..75 and B 60..61, alike). That is how a network that works on square-rooted colour turns its result back into linear colour: x * |x|
+static int up_mfx_squares(const void *code, size_t n) {
+    int hits = 0;
+    for (size_t o = 0; o + 16 <= n && hits < 8; o += 16) {
+        uint64_t lo, hi; memcpy(&lo, (const uint8_t *)code + o, 8); memcpy(&hi, (const uint8_t *)code + o + 8, 8);
+        unsigned op = lo & 0xfff, ra = (lo >> 24) & 0xff, rb = (lo >> 32) & 0xff;
+        if ((op != 0x220 && op != 0x232) || ra != rb || ra == 0xff || ((hi >> 9) & 1) == ((lo >> 62) & 1)) continue;
+        if (op == 0x232 && ((hi >> 10) & 3) != ((lo >> 60) & 3)) continue;
+        hits++;
+    }
     return hits == 8;
 }
 static int up_mfx_color(const void *code, size_t n) {
@@ -14586,6 +14638,11 @@ static int up_mfx_color(const void *code, size_t n) {
     int enc16 = UP_F16(0.41650390625f) || UP_F16(0.416748046875f), dec16 = UP_F16(0.040435791015625f) && UP_F16(2.3984375f) && UP_F16(0.07745361328125f);   // enc16 (1 / 2.4 either way rounded): no pack has it; it must not read as encoded input
 #undef UP_F32
 #undef UP_F16
+    // No sRGB curve: a curve needs a power, MUFU.EX2 and MUFU.LG2 (Splatoon Raiders' variants take theirs on packed halves), so code with neither cannot convert through one, wherever its
+    // constants come from (a constant buffer's are not in the code). It can still square: Ocarina of Time's agl_ndsr_vr.pck and agl_ndsr_vr_light.pck networks work on colour a pass
+    // before them square-rooted (gamma 2, RGB9E5F) and write their result squared, x * |x| (R11G11B10F): root-encoded input, linear output. Drawn as one colour space, the output
+    // stayed root-encoded, about the square root of the game's (washed out). Without either, input and output are in one colour space and the linear shape converts nothing
+    if (!enc32 && !dec32 && !enc16 && !dec16 && !up_mfx_has_pow(code, n)) return up_mfx_squares(code, n) ? UP_COLOR_ROOT : UP_COLOR_LINEAR;
     return enc32 && dec32 && !enc16 && !dec16 ? UP_COLOR_LINEAR : dec16 && !enc16 && !enc32 && !dec32 ? UP_COLOR_SRGB : UP_COLOR_KEEP;
 }
 // Whether cs is one of the game's upscaler shaders (DM_GAME_UPSCALER_KEYS: comma-separated 16-digit keys)
@@ -14597,23 +14654,24 @@ static void up_mfx_read_color(NvShader *cs, const NVNshaderData *sd) {
     if (cs->up_color || !DM_GAME_UPSCALER_N || !up_mfx_on() || !up_mfx_named(cs)) return;
     uint32_t nctl, ncode = 0; if (sd->control) nvn_ctl_lens(sd->control, &nctl, &ncode);
     cs->up_color = sd->data && ncode && ncode < (1u << 24) ? up_mfx_color((const void *)(uintptr_t)sd->data, ncode) : UP_COLOR_KEEP;
-    MLOG("upscaler %s: %s", cs->key, cs->up_color == UP_COLOR_LINEAR ? "linear input and output, MetalFX in HDR mode" : cs->up_color == UP_COLOR_SRGB ? "sRGB-encoded input, linear output, MetalFX in perceptual mode" : "neither of the colour shapes MetalFX draws; the game's shader runs");
+    MLOG("upscaler %s: %s", cs->key, cs->up_color == UP_COLOR_LINEAR ? "input and output in one colour space (linear, or no sRGB curve in the code), MetalFX in HDR mode" : cs->up_color == UP_COLOR_SRGB ? "sRGB-encoded input, linear output, MetalFX in perceptual mode" : cs->up_color == UP_COLOR_ROOT ? "square-rooted input, linear output (the shader squares): squared into linear, then MetalFX in HDR mode" : "neither of the colour shapes MetalFX draws; the game's shader runs");
 }
 // Whether cs is one of the game's upscaler shaders, the player chose MetalFX and its colour is one MetalFX draws
 static int up_mfx_wanted(NvShader *cs) {
     if (cs->up_mfx) return cs->up_mfx == 1;
     cs->up_mfx = 2;
     if (!DM_GAME_UPSCALER_N || !up_mfx_on()) return 0;
-    if (up_mfx_named(cs) && (cs->up_color == UP_COLOR_LINEAR || cs->up_color == UP_COLOR_SRGB)) cs->up_mfx = 1;
+    if (up_mfx_named(cs) && (cs->up_color == UP_COLOR_LINEAR || cs->up_color == UP_COLOR_SRGB || cs->up_color == UP_COLOR_ROOT)) cs->up_mfx = 1;
     return cs->up_mfx == 1;
 }
-static up_mfx_scaler *up_mfx_scaler_for(NSUInteger iw, NSUInteger ih, NSUInteger ow, NSUInteger oh, int srgb) {
-    NSUInteger key[5] = {iw, ih, ow, oh, (NSUInteger)srgb};
+static up_mfx_scaler *up_mfx_scaler_for(NSUInteger iw, NSUInteger ih, NSUInteger ow, NSUInteger oh, int color) {   // color: the variant's (UP_COLOR_LINEAR, _SRGB, _ROOT)
+    int srgb = color == UP_COLOR_SRGB;
+    NSUInteger key[5] = {iw, ih, ow, oh, (NSUInteger)color};
     for (int i = 0; i < UP_MFX_SCALERS; i++) if (!memcmp(g_up_mfx[i].key, key, sizeof key)) return g_up_mfx[i].refused ? NULL : &g_up_mfx[i];
     up_mfx_scaler *e = &g_up_mfx[g_up_mfx_next++ % UP_MFX_SCALERS];   // dynamic resolution moves the input: a few sizes stay made
     if (e->read && e->read != e->out) defer_obj_unref(e->read);
     if (e->in) { res_remove(e->in); defer_obj_release(e->in); } if (e->out) { res_remove(e->out); defer_obj_release(e->out); }   // a recorded scale still holds them
-    *e = (up_mfx_scaler){.key = {iw, ih, ow, oh, (NSUInteger)srgb}, .refused = 1};
+    *e = (up_mfx_scaler){.key = {iw, ih, ow, oh, (NSUInteger)color}, .refused = 1};
     NSError *err = nil; uint64_t t0 = now_ns();
     if (!g_fx_comp) g_fx_comp = [g_dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&err];
     MTLFXSpatialScalerDescriptor *d = [MTLFXSpatialScalerDescriptor new];
@@ -14628,7 +14686,7 @@ static up_mfx_scaler *up_mfx_scaler_for(NSUInteger iw, NSUInteger ih, NSUInteger
         td.pixelFormat = of; td.width = ow; td.height = oh; td.usage = sc.outputTextureUsage | MTLTextureUsageShaderRead | (srgb ? MTLTextureUsagePixelFormatView : 0); out = [g_dev newTextureWithDescriptor:td];
         read = srgb ? [out newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB] : out;
     }
-    MLOG("%supscaler: MetalFX spatial scaler (%s) %lux%lu → %lux%lu%s, %.1f ms", sc && in && read ? "" : "[RED] ", srgb ? "perceptual" : "HDR", (unsigned long)iw, (unsigned long)ih, (unsigned long)ow, (unsigned long)oh,
+    MLOG("%supscaler: MetalFX spatial scaler (%s) %lux%lu → %lux%lu%s, %.1f ms", sc && in && read ? "" : "[RED] ", srgb ? "perceptual" : color == UP_COLOR_ROOT ? "HDR, input squared" : "HDR", (unsigned long)iw, (unsigned long)ih, (unsigned long)ow, (unsigned long)oh,
          sc && in && read ? "" : ": MetalFX made none; the game's upscaler draws this size", (now_ns() - t0) / 1e6);
     if (!sc || !in || !read) return NULL;
     in.label = @"upscaler input"; out.label = @"upscaler output"; res_add(in); res_add(out); res_commit();
@@ -14663,11 +14721,11 @@ static int up_mfx_encode(NvShader *cs) {
     if (!in || !out || in == out || in.textureType != MTLTextureType2D || out.textureType != MTLTextureType2D || in.sampleCount != 1 || out.sampleCount != 1 ||
         fmt_int_or_ds(in.pixelFormat) || fmt_int_or_ds(out.pixelFormat) || mtl_fmt_block(out.pixelFormat) || !up_mfx_rect(v, in.width, in.height, &ir) || !up_mfx_rect(v + 4, out.width, out.height, &orr) ||
         orr.width < ir.width || orr.height < ir.height || (orr.width == ir.width && orr.height == ir.height)) { g_up_mfx_kept++; return 0; }
-    int srgb = cs->up_color == UP_COLOR_SRGB;
-    up_mfx_scaler *e = up_mfx_scaler_for((NSUInteger)ir.width, (NSUInteger)ir.height, (NSUInteger)orr.width, (NSUInteger)orr.height, srgb); if (!e) { g_up_mfx_kept++; return 0; }
+    int srgb = cs->up_color == UP_COLOR_SRGB, root = cs->up_color == UP_COLOR_ROOT;
+    up_mfx_scaler *e = up_mfx_scaler_for((NSUInteger)ir.width, (NSUInteger)ir.height, (NSUInteger)orr.width, (NSUInteger)orr.height, cs->up_color); if (!e) { g_up_mfx_kept++; return 0; }
     id<MTL4FXSpatialScaler> sc = e->sc;
     // Straight in and out when MetalFX can take the game's textures as they are; through the scaler's own textures otherwise
-    int direct = !srgb && (NSUInteger)ir.width == in.width && (NSUInteger)ir.height == in.height && out.storageMode == MTLStorageModePrivate &&
+    int direct = !srgb && !root && (NSUInteger)ir.width == in.width && (NSUInteger)ir.height == in.height && out.storageMode == MTLStorageModePrivate &&
                  in.pixelFormat == MTLPixelFormatRGBA16Float && out.pixelFormat == MTLPixelFormatRGBA16Float && !ir.xoffset && !ir.yoffset && !orr.xoffset && !orr.yoffset && (NSUInteger)orr.width == out.width &&
                  (NSUInteger)orr.height == out.height && (in.usage & sc.colorTextureUsage) == sc.colorTextureUsage && (out.usage & sc.outputTextureUsage) == sc.outputTextureUsage;
     if (!direct && !(out.usage & MTLTextureUsageRenderTarget)) { g_up_mfx_kept++; return 0; }
@@ -14676,7 +14734,7 @@ static int up_mfx_encode(NvShader *cs) {
     ubd_land_compute();
     NVNcopyRegion at0 = {0, 0, 0, ir.width, ir.height, 1}, at0o = {0, 0, 0, orr.width, orr.height, 1};
     id<MTLTexture> color = direct ? in : e->in, result = direct ? out : e->out;
-    if (!direct && !copy_t2t_draw(in, color, 0, 0, 0, 0, &ir, &at0, 0, 0)) { g_up_mfx_kept++; return 0; }   // into RGBA16F at the origin (a nearest draw: same size)
+    if (!direct && !copy_t2t_draw_sq(in, color, 0, 0, 0, 0, &ir, &at0, 0, 0, root)) { g_up_mfx_kept++; return 0; }   // a root-encoded input squared into linear colour on the way   // into RGBA16F at the origin (a nearest draw: same size)
     id<MTL4ComputeCommandEncoder> ce = [g_cb computeCommandEncoder];   // as dlss_eval: MetalFX opens encoders of its own, which take no barrier
     [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageBlit visibilityOptions:resource_vis()];
     [ce barrierAfterStages:MTLStageBlit beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];
@@ -14693,7 +14751,7 @@ static int up_mfx_encode(NvShader *cs) {
     args_dirty_all();
     if (!g_up_mfx_n++) MLOG("upscaler: first dispatch of %s drawn by MetalFX, %dx%d at %d,%d of %lux%lu (format %lu) → %dx%d at %d,%d of %lux%lu (format %lu)%s", cs->key, ir.width, ir.height, ir.xoffset, ir.yoffset,
                             (unsigned long)in.width, (unsigned long)in.height, (unsigned long)in.pixelFormat, orr.width, orr.height, orr.xoffset, orr.yoffset, (unsigned long)out.width, (unsigned long)out.height,
-                            (unsigned long)out.pixelFormat, direct ? ", straight" : srgb ? ", through RGBA16F, decoded from sRGB" : ", through RGBA16F");
+                            (unsigned long)out.pixelFormat, direct ? ", straight" : srgb ? ", through RGBA16F, decoded from sRGB" : root ? ", squared into RGBA16F" : ", through RGBA16F");
     return 1;
 }
 // The present pass: src's valid rectangle drawn into dst (the drawable, or a screenshot's texture) as present_encode draws it, through MetalFX first where fx_encode takes it
