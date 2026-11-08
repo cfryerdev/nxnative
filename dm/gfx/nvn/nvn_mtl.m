@@ -550,8 +550,9 @@ static want_list g_bf_want = {"DM_NVN_BF_WANT", PTHREAD_MUTEX_INITIALIZER}, g_du
 void bf_want_note(const char *key) { want_note(&g_bf_want, key); }
 
 // ---------- Memory pools ----------
-typedef struct { uintptr_t lo, hi; uintptr_t base; __unsafe_unretained id<MTLBuffer> buf; uint64_t gpu; const void *key; int res; uint64_t born; uintptr_t end; uint64_t unk; int raw; } pool_ent;   // res: already in the residency set (on demand, see pool_res); born: when it was added (ns); end, unk: a large pool's chunk (see BIG_MIN)
+typedef struct { uintptr_t lo, hi; uintptr_t base; __unsafe_unretained id<MTLBuffer> buf; uint64_t gpu; const void *key; int res; uint64_t born; uintptr_t end; uint64_t unk; int raw; uint32_t n_tex_reads, n_other; } pool_ent;   // res: already in the residency set (on demand, see pool_res); born: when it was added (ns); end, unk: a large pool's chunk (see BIG_MIN); raw: the game has exposed a GPU address in it (pool_raw), so the pool table lists it and makes it resident; n_tex_reads / n_other: lookups by texture uploads / by anything else (mem_census)
 static pool_ent *g_pools; static int g_npool, g_cap;
+static id<MTLBuffer> pool_buf(uintptr_t a, uintptr_t b);   // a pool's zero-copy buffer over [a, b), made over writable pages (beside the GPU-written storage spans below)
 static int g_pidx_ok, g_plast = -1;   // whether the address→pool index is valid, the last hit (pool_find)
 static NSMutableArray *g_keep;                  // Holds the buffer references (pool_ent has non-owning pointers)
 static uint64_t g_pool_adds;
@@ -9439,6 +9440,7 @@ enum { POOL_FRAME_BYTES = 32u << 20, POOL_REQ_BYTES = 128u << 20, POOL_SUB_MS = 
 static uint64_t g_walk_frame = ~0ull, g_walk_spent, g_walk_sub = ~0ull; static double g_walk_ms; static int g_walk_over;
 static uint64_t pool_tex_size(const tex_t *t) { return t->L.size ? t->L.size : 1; }
 static int pool_size_cmp(const void *a, const void *b) { uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b; return x < y ? -1 : x > y; }
+static int pool_skip_retired(void);   // DM_NVN_POOL_SKIP_RETIRED / the profile key: retired texture IDs without a view take the dummy in a pool table
 // DM_POOL_BUDGET_MB: make textures up front while the residency set is under this size. Without it, a twentieth of the working set against the device's allocated size, which counts each no-copy buffer in full, so a game with many pools has no room
 static uint64_t pool_budget_mb(void) { static int64_t v = -1; if (v < 0) { const char *e = getenv("DM_POOL_BUDGET_MB"); v = e ? atoll(e) : 0; if (v < 0) v = 0; } return (uint64_t)v; }
 static uint64_t pool_budget(void) { uint64_t mb = pool_budget_mb(); return mb ? mb << 20 : g_dev.recommendedMaxWorkingSetSize / 20; }

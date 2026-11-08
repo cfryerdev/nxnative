@@ -795,6 +795,33 @@ Games read this count as a position in their own command memory and size their h
 
 - `nvnPrivate0`, a new SDK 20 import, needs nothing: it is a flag in `sdk`'s bss that enables an inlined command-buffer fast path when the NVN driver sets it (it stays 0). Found on [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0, SDK 20.5.22).
 
+### `nvnTextureBuilderGetViewOffset`, `nvnTextureViewCompare`, `nvnBlendStateSetAdvancedNormalizedDst`
+
+- **Symptom:** `[RED] NVN unimplemented function called` for each.
+- **Fix:** the builder's offset is the texture's (`view_offset`). The compare is true when the two views set the same fields to the same values: that true means equal is taken from the name, as no caller in `main` was found to confirm it. The blend flag is kept for its getter; the fixed-function factors the replay uses read a normalized target as it is.
+- **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md).
+
+### Texture IDs of one storage share one packaged texture
+
+- **Symptom:** a pool walk makes gigabytes of textures from far fewer images: Ocarina of Time's 32,768 IDs name 3,607 storages, and one texture per ID came to 2 GB.
+- **Cause:** a packaged texture belongs to its serial, and the engine registers the same storage under many texture objects.
+- **Fix:** general (`nvn_mtl.m` `g_pkg_share`, `tex_alias_key`, `pkg_shared`). Packaged textures are shared by storage, layout and format through a weak table, so a new serial of the same storage takes the existing one. A pool's removal evicts its keys (`mtl_alias_drop_pool`), and the walk's budget does not count a texture that is already shared.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
+### Finalizing a copy of a texture object
+
+- **Symptom:** thousands of first uploads a frame in a scene whose textures do not change: Ocarina of Time, about 15,000 a frame.
+- **Cause:** the engine copies an `NVNtexture` by value and finalizes the copy, while the original stays in use. The host keyed the texture by serial, so finalizing the copy deleted the host texture of the original, and its next use uploaded it again.
+- **Fix:** general (`nvn_mtl.m` `mtl_tex_release`). The registry keeps the address of the object that was initialized, and a finalize is ignored when that owner still holds the texture's magic and serial (read with `vm_read_overwrite`, as the owner's memory may be gone). `t_cpu_tex` checks both orders.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
+### Freeing a memory pool during a texture ID walk
+
+- **Symptom:** the host stops with `NSInvalidArgumentException: -[NvPkg buffer]: unrecognized selector sent to instance` under `tex_by_id` (via `pool_entry`, `pool_gpu`, `encode_args_`, `draw_`, `mesh_tasks_draw`); not a GPU hang, no `kIOGPU` errors. It came after minutes of play, right after a save or at a scene change.
+- **Cause:** `nvnMemoryPoolFinalize` on a game thread dropped the pool's textures from the CPU-written set (`cpu_tex_drop_pool`) before it marked the pool's texture IDs gone under `g_rmu` (`treg_drop_pool_views`). A pool walk on the submit thread holds `g_rmu` and visits every registered ID; one of that pool's IDs reached in between was not gone, its pool's magic was still set, and its texture was no longer CPU-written, so `tex_mtl_` skipped the packaged path and returned the texture table's entry as it was: the `NvPkg` wrapper of the upload, not an `MTLTexture`. `tex_by_id`'s first message to it threw.
+- **Fix:** general (`nvn_mtl.m` `mtl_alias_drop_pool`). The IDs are marked gone first: a walk holding `g_rmu` either finishes while the classification is still there or finds the ID gone and takes `tex_made`, which unwraps the `NvPkg`. `t_cpu_tex --metal` (`finalize_during_walk`) finalizes a pool on another thread while it holds `g_rmu`: with the old order the classification was gone and `tex_mtl` handed out the `NvPkg`.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), from two players' reports on PR #1299 and PR #1420 (an M3 Max 412 s into Kokiri Forest after a save; an M4 Pro in the Deku Tree after about 40 minutes). PR #1420 found where the `NvPkg` escaped.
+
 ### A raw address table pins CPU-only pools and revives retired textures
 
 - **Symptom:** a Switch 2 load makes private textures and their tiled guest copies resident together. Bindless descriptor scans can also allocate fresh zero-filled textures for retired objects whose aliases have already been replaced, triggering more alias takeovers and table rebuilds.
@@ -810,3 +837,17 @@ Games read this count as a position in their own command memory and size their h
 - **Fix:** after whole-map creation succeeds, remove obsolete entries and queue their buffers through the existing fence-deferred release. Repair the moved entries' chunk/full indices, clear obsolete chunk indices and invalidate address caches. A refused whole mapping leaves existing chunks intact.
 - **Found on:** Ocarina of Time scene-load memory investigation (#1299). This complements #1319's earlier retirement of replaced chunks; it does not change chunk thresholds or raw-address exposure policy.
 - **Check:** `t_pool_retire` covers two large pools, a separate small pool, a lengthened chunk, consolidation, fence-delayed residency removal, repaired lookups and a GPU copy from the surviving whole mapping. No isolated game-memory or FPS saving is claimed.
+
+### A texture shared by its packaged texture's serials left the residency set with one of them
+
+- **Symptom:** after 15 to 45 minutes of play, a segment command buffer fails with `kIOGPUCommandBufferCallbackErrorPageFault` and every later submission is refused (`SubmissionsIgnored`): the picture freezes, or turns pink, while the audio goes on. With `DM_RES_CHECK=1`, `missing residency` lines name 260x260 textures before the fault.
+- **Cause:** the serials of one storage share one packaged texture ([previous entry](#texture-ids-of-one-storage-share-one-packaged-texture)). At the GPU's first write over that storage (`cpu_unc_drop`), each of them, live or finalized in the ghost ring, gets the package's texture itself (`tex_put`), and no table owns it. The package's release (`NvPkg`'s `dealloc`) took it out of the residency set at once, and so did the release of any one holder (`tex_put`'s ghost-ring eviction, `serial_put`, `serial_del`), while the other serials still drew with it. A command buffer reading it then faults. Retiring an object meant taking it out of the set, whoever else held it.
+- **Fix:** every game (`nvn_mtl.m` `defer_drain`, `g_retire_held`, `g_ghost_held`). A retired resource that a serial entry still holds, in `g_by_serial` or the ghost ring (both counted), keeps its residency and waits in `g_retire_held`. The last entry's release retires it again. The package's release goes through the same deferred release. A re-upload doesn't write into a spare that serials still hold. The sharing table's storage takeover no longer scans the ghost ring for that case, since the same rule covers it. The memory report counts the waiting textures (`retired but held by a serial`). `t_cpu_tex --metal` (`handover_holders`) hands a package over to two serials and drops the package, then each serial, the last through the ghost ring.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (GitHub issue #1326; diagnosis and A/B in PR #1644), v131072 on a Mac mini M4, 16 GB. The faults came at 44, 29, 24 and 15.5 minutes. A diagnostic that records where each object left the residency set named the missing textures before two faults: 260x260 terrain tiles handed over this way, released by the ghost-ring eviction. PR #1644 kept them in a table until their pool went: 107 minutes with no fault, against a fault at 37 minutes without it.
+
+### A deferred-release drain read entries it had handed back to the queue
+
+- **Symptom:** `CRASH sig=11` in `class_conformsToProtocol` (`_class_conformsToProtocol_unrealized_nolock`) on a Metal completion handler's thread, `bt: class_conformsToProtocol -[NSObject conformsToProtocol:] defer_drain __mtl_sub_commit_block_invoke`, with a garbage class pointer in x0.
+- **Cause:** `defer_drain` runs on the guest submit thread and on completion handlers at once. When it could not take `g_smu` (the [previous entry](#a-texture-shared-by-its-packaged-textures-serials-left-the-residency-set-with-one-of-them)'s check), it put the retired resources back on `g_deferred` and only then went over its whole list again with `conformsToProtocol:`, to keep the rest. The other drain could take those entries back in the meantime, release their objects and clear `d->object`. A message sent to such an object's freed memory crashed in the runtime.
+- **Fix:** every game (`nvn_mtl.m` `defer_drain`). Each entry is sorted once, before anything goes back to the queue, and the busy branch drains only the entries it kept.
+- **Found on:** [ROMANCE OF THE THREE KINGDOMS XIV](../../dm/games/0100ED7012DB2000/README.md), in its main menu about 80 s after boot, on its first run on the Mac (host from `bd979ced`); the code came with the previous entry's fix (`fa9cfb84`).
