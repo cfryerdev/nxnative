@@ -1,6 +1,6 @@
 # The Legend of Zelda: Ocarina of Time (`0400486024DEC000`)
 
-A Switch 2 game: update v131072, SDK 22.2.8 (`Ounce`). Nintendo EPD's engine (sead, agl, gsys, Havok, CRIWARE; project `Owl`, with Tears of the Kingdom's file layout) on NVN2. Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`, no rewriter patches. Status: plays on the Mac through the title, the opening, a new file's first scene, Link's house and Kokiri Forest, with saves, at about 59 fps with the picture close to console video. Mac only so far.
+A Switch 2 game: update v131072, SDK 22.2.8 (`Ounce`). Nintendo EPD's engine (sead, agl, gsys, Havok, CRIWARE; project `Owl`, with Tears of the Kingdom's file layout) on NVN2. Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`. Update v131072 has an optional host render-scale ceiling. Status: plays on the Mac through the title, the opening, a new file's first scene, Link's house and Kokiri Forest, with saves, at about 59 fps with the picture close to console video. Mac only so far.
 
 ## What it needs
 
@@ -16,6 +16,14 @@ A Switch 2 game: update v131072, SDK 22.2.8 (`Ounce`). Nintendo EPD's engine (se
 | `tex_flush_upload on`, `tex_dirty_upload on` | `game.tsv` | as Tears of the Kingdom: the CPU writes the terrain tiles' height (R32F), blend and hole (RGBA8) maps into textures after creating them. Without the keys those textures stay zero: flat blue holes in the ground around the path with grass floating in them, and grey stone where the console shows dirt |
 | `shader_groups`, `shader_note` | `game.tsv` | shaders grouped as `/Shader/`, `/Effect/`, `/Lib/`, `/UI/` |
 | `pad_layout full` | `game.tsv` | a 3D field and both sticks |
+
+## Render-scale ceiling
+
+Update v131072 (`main` build `e0f3ccfaf50065ae4ea01eb5aeb13b1a`) accepts `DM_RENDER_SCALE=0.5` through `1.0`. The default `1.0` keeps the game's original scale. Lower values cap the scale the engine has selected, so dynamic resolution can still reduce it further. The output size and the game's upscaler follow their existing paths. For example, a host ceiling of `0.5` keeps a game-selected `0.4` and caps a game-selected `0.75` to `0.5`.
+
+The rewriter checks the instruction at `main+0x31d3f48` before replacing its final scale store. The stub reads the existing host state page at `+0x10`, preserves the store's registers and condition flags, and advertises `RENDER_SCALE` so the launcher offers its existing Render scale control. Other builds receive no fixed-address hook. This is a deliberate game rendering option whose scale calculation lives in the game binary. It uses the existing shader libraries.
+
+Validation on the M1 Pro exercised the original cap at 50% on the house-to-Kokiri Forest route. The isolated stub additionally preserves the source SIMD register, checked by ARM64 execution across caps, game-selected scales and condition flags. The test also checks the launcher setting against rewritten metadata. Sustained frame-rate gains, later areas and iOS remain unmeasured for this isolated change.
 
 ## Files
 
