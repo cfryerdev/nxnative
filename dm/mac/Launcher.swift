@@ -21,7 +21,7 @@ struct LauncherView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 64, height: 64).accessibilityHidden(true)
+                Image(nsImage: Bundle.main.image(forResource: "AppIcon2") ?? NSApp.applicationIconImage).resizable().frame(width: 64, height: 64).accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(info("CFBundleName") ?? "Game").font(.title2.weight(.semibold))
                     Text("Version \(info("CFBundleShortVersionString") ?? "1.0")").foregroundStyle(.secondary)
@@ -150,6 +150,7 @@ enum GameFile {
 struct GameFileSection: View {
     @AppStorage("game.file") private var file = ""
     @State private var problem: String?
+    @StateObject private var scanner = GameFileScanner()
 
     var body: some View {
         Section {
@@ -160,10 +161,15 @@ struct GameFileSection: View {
             if GameFile.fixed == nil {
                 Button(file.isEmpty ? "Choose game file…" : "Choose a different file…", action: choose)
             }
+            Button("Scan for errors", action: startScan).disabled(!GameFile.ready(file))
             if let p = problem ?? missing { Text(p).foregroundStyle(.red).font(.callout) }
         } footer: {
             Text("The game's .nup file. The game is read straight from it, so leave it where it is; a file on an external drive works while the drive is connected.")
         }
+        .sheet(isPresented: Binding(get: { scanner.working }, set: { if !$0 { scanner.cancel() } })) {
+            ScanProgress(path: GameFile.fixed ?? file, cancel: { scanner.cancel() })
+        }
+        .sheet(item: $scanner.result) { s in ScanResult(s: s) }
     }
 
     private var missing: String? {
@@ -178,6 +184,133 @@ struct GameFileSection: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let r = GameFile.check(url.path)
         if r.ok { file = url.path; problem = nil } else { problem = r.why }
+    }
+
+    private func startScan() {
+        let path = GameFile.fixed ?? file
+        guard !path.isEmpty, FileManager.default.fileExists(atPath: path) else { return }
+        scanner.start(path)
+    }
+}
+
+@_silgen_name("dm_game_file_scan")
+private func dmGameFileScan(_ path: UnsafePointer<CChar>, _ files: UnsafeMutablePointer<UInt64>, _ checked: UnsafeMutablePointer<UInt64>, _ damaged: UnsafeMutablePointer<UInt64>, _ packedDamaged: UnsafeMutablePointer<UInt64>, _ zstdFiles: UnsafeMutablePointer<UInt64>, _ zstdOK: UnsafeMutablePointer<Int32>, _ more: UnsafeMutablePointer<UInt64>, _ truncated: UnsafeMutablePointer<Int32>, _ list: UnsafeMutablePointer<CChar>, _ listN: Int, _ why: UnsafeMutablePointer<CChar>, _ whyN: Int) -> Int32   // launcher.c
+
+/// What the scan found (dm_game_file_scan in launcher.c, the checks of dm/host/game_scan.h): the damage a start would not report until the game asked for the file
+struct GameScan: Identifiable {
+    let id = UUID()
+    let path: String
+    let error: String?   // the file cannot be read as a game file at all
+    let files: UInt64, checked: UInt64, damaged: UInt64, packedDamaged: UInt64, zstdFiles: UInt64
+    let zstdOK: Bool
+    let more: UInt64   // damaged files past the list's room
+    let truncated: Bool
+    let list: [String]
+    var healthy: Bool { error == nil && damaged == 0 && packedDamaged == 0 }
+
+    static func run(_ path: String) -> GameScan {
+        var files: UInt64 = 0, checked: UInt64 = 0, damaged: UInt64 = 0, packed: UInt64 = 0, zstdFiles: UInt64 = 0, more: UInt64 = 0
+        var zstdOK: Int32 = 0, truncated: Int32 = 0
+        var list = [CChar](repeating: 0, count: 16384), why = [CChar](repeating: 0, count: 1024)
+        let v = path.withCString { p in
+            dmGameFileScan(p, &files, &checked, &damaged, &packed, &zstdFiles, &zstdOK, &more, &truncated, &list, list.count, &why, why.count)
+        }
+        return GameScan(path: path, error: v == -1 ? String(cString: why) : nil, files: files, checked: checked, damaged: damaged, packedDamaged: packed,
+                        zstdFiles: zstdFiles, zstdOK: zstdOK != 0, more: more, truncated: truncated != 0,
+                        list: v == 0 ? String(cString: list).components(separatedBy: "\n").filter { !$0.isEmpty } : [])
+    }
+}
+
+/// The scan's runner: the C scan blocks its thread for a few seconds, so it runs detached and the sheet stays live; a cancelled scan's late result is dropped
+final class GameFileScanner: ObservableObject {
+    @Published var result: GameScan?
+    @Published var working = false
+    private var job: Task<Void, Never>?
+
+    func start(_ path: String) {
+        job?.cancel()
+        result = nil; working = true
+        job = Task.detached(priority: .userInitiated) {
+            let s = GameScan.run(path)
+            await MainActor.run { [weak self] in
+                if !(self?.job?.isCancelled ?? true) { self?.result = s; self?.working = false }
+            }
+        }
+    }
+
+    func cancel() {
+        job?.cancel()
+        working = false
+    }
+}
+
+/// The scan at work: an indeterminate progress, the file it is reading, and a way out
+struct ScanProgress: View {
+    let path: String
+    let cancel: () -> Void
+
+    var body: some View {
+        VStack(spacing: 12) {
+            ProgressView().controlSize(.large)
+            Text("Reading the game file…").font(.headline)
+            Text(path).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.head)
+            Button("Cancel", action: cancel)
+        }
+        .padding(30).frame(width: 400)
+    }
+}
+
+/// The scan's modal: what was checked, what was found, and what the finding means for the game
+struct ScanResult: View {
+    let s: GameScan
+    @Environment(\.dismiss) private var dismiss
+
+    private var title: String {
+        if s.error != nil { return "The game file cannot be scanned" }
+        return s.healthy ? "No problems found" : "The game file is damaged"
+    }
+
+    private var message: String {
+        if let e = s.error { return e }
+        if s.healthy {
+            var t = "The game file's table of contents is whole, and its \(s.files.formatted()) files sit where this app reads them."
+            if s.checked > 0 { t += " The \(s.checked.formatted()) files whose format can be checked were looked at, and every one starts as its name promises." }
+            if s.zstdFiles > 0 {
+                t += s.zstdOK ? " Files stored compressed were unpacked for the check."
+                    : " This app was built without the decompressor, so the \(s.zstdFiles.formatted()) files stored compressed were not checked."
+            }
+            return t + " The scan reads the start of each file; it does not check the whole game file byte for byte."
+        }
+        var t = "\(s.damaged.formatted()) of the \(s.checked.formatted()) files checked do not start as their names promise (a .zs file that is not a zstd stream):"
+        if s.packedDamaged > 0 {
+            t += "\n\(s.packedDamaged.formatted()) files were packed as they were read, because their hashes failed (--allow-damaged)."
+        }
+        if s.more > 0 { t += "\n… and \(s.more.formatted()) more." }
+        if s.truncated { t += "\nThe scan did not reach every file." }
+        t += "\n\nThe game asks for a file like this again on every pass of its background loader and never stops: several CPU cores stay busy all session and the frame rate sags."
+        t += " The damage is in the game file itself, so copying this file again brings the same bytes: the fix is a good copy of the game."
+        return t
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Image(systemName: s.error != nil ? "xmark.octagon.fill" : s.healthy ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                    .font(.title2).foregroundStyle(s.error != nil ? Color.red : s.healthy ? Color.green : Color.orange)
+                Text(title).font(.title3.weight(.semibold))
+                Spacer()
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(message).font(.callout)
+                    if !s.list.isEmpty {
+                        Text(s.list.joined(separator: "\n")).font(.system(.callout, design: .monospaced)).textSelection(.enabled)
+                    }
+                }.padding(1)
+            }
+            HStack { Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.defaultAction) }
+        }
+        .padding(20).frame(width: 480, height: 400)
     }
 }
 

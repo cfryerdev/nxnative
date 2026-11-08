@@ -26,6 +26,7 @@
 #include <unistd.h>
 #include "romfs_image.h"
 #include "nup_image.h"
+#include "game_scan.h"
 #include "save_sync.h"
 
 extern char **environ;
@@ -173,6 +174,27 @@ int dm_game_file_check(const char *path, char *why, size_t n) {
     if (!m) { snprintf(why, n, "%s is not a NUP file", path); return 0; }
     romfs_image_close(m); snprintf(why, n, "RomFS image"); return 1;
 }
+// The settings window's scan (Launcher.swift GameFileSection, "Scan for errors"): the game file's index is validated by the open, then every file whose name promises a format is
+// checked at its first bytes (dm/host/game_scan.h), which names the damage a start would not see until the game asked for the file. 1 healthy, 0 damaged (the counts and the list of
+// damaged files out), -1 the file cannot be read as a game file (why)
+int dm_game_file_scan(const char *path, uint64_t *files, uint64_t *checked, uint64_t *damaged, uint64_t *packed_damaged, uint64_t *zstd_files, int *zstd_ok, uint64_t *more, int *truncated, char *list, size_t listn, char *why, size_t whyn) {
+    char v[32] = ""; info_string("DMGameVersion", v, sizeof v);
+    uint32_t want = (uint32_t)strtoul(v, NULL, 10), got = 0;
+    romfs_img *m;
+    if (nup_is(path)) {
+        if (!(m = nup_image_open(path, want, &got, why, whyn))) return -1;
+    } else if (!(m = romfs_image_open(path))) {
+        snprintf(why, whyn, "%s cannot be read as a game file (a NUP or a RomFS image)", path);
+        return -1;
+    }
+    dm_scan_report r; memset(&r, 0, sizeof r);
+    dm_game_scan(m, &r);
+    romfs_image_close(m);
+    *files = r.files; *checked = r.checked; *damaged = r.damaged; *packed_damaged = r.packed_damaged; *zstd_files = r.zstd_files; *zstd_ok = r.zstd_ok; *more = r.more; *truncated = r.truncated;
+    snprintf(list, listn, "%.*s", (int)(r.used < listn ? r.used : listn - 1), r.list);
+    return r.damaged || r.packed_damaged ? 0 : 1;
+}
+
 static int game_file(char *why, size_t n) {
     char s[PATH_MAX], v[32] = "";
     if (!getenv("DM_ROMFS") && pref_string(CFSTR("game.file"), s, sizeof s)) setenv("DM_ROMFS", s, 1);
