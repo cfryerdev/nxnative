@@ -408,6 +408,8 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --
 python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --platform mac-app --mac-sign "Developer ID Application: <name> (<team ID>)"
 ```
 
+`--icon <image>` overrides the game icon the packer takes from the control data (`icon.jpg`): a JPG or PNG, 256x256 or larger (it is resized to every size the icon holds). A NUP without control data carries no icon, and without the switch the app packs a blank one.
+
 `--platform` takes `ios` (the default: the IPA, or the Xcode project with `--prepare-xcode`), `mac` ([A Mac-only build for development](#a-mac-only-build-for-development)) and `mac-app` ([A Mac app](#a-mac-app)). With either Mac platform, `--seen-shaders` builds only the shaders a game's playtests used ([Building selected Mac shaders](#building-selected-mac-shaders)).
 
 In Spyder, open the script, fill in the settings at the top (`NSP_DIR`, `PROD_KEYS`, and optionally `PACKAGE`, `OUT_IPA`, `APP_NAME`, `BUNDLE_ID`, `LANGUAGE`, `KEEP_EXTRACTED`, `SHOW_FPS`, `MOTION`, `PSO_GPUS`, `PLATFORM`, `PROGRAM_INDEX`, `SEEN_SHADERS`; for a game without a profile `HEAP_CHECK`, `HEAP_CHECK_SECS`, `PROVISIONAL`), and press F5. Empty paths are asked for at run time.

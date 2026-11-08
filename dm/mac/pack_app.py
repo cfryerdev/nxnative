@@ -401,7 +401,7 @@ def parse(argv):
     ap.add_argument('--settings', help='the game\'s launcher settings (dm/games/settings.py output; Resources/dm/launcher.json, which the Mac front end reads)')
     ap.add_argument('--title-id', required=True); ap.add_argument('--name', required=True)
     ap.add_argument('--version'); ap.add_argument('--bundle-id'); ap.add_argument('--category'); ap.add_argument('--lang'); ap.add_argument('--marker', help='the profile\'s romfs_marker')
-    ap.add_argument('--icon', help='the game icon (icon.jpg from the control data)')
+    ap.add_argument('--icon', help='the app icon (a JPG or PNG, 256x256 or larger) overriding the control data\'s icon.jpg')
     ap.add_argument('--sign', default='-', help='codesign identity (default: - = ad-hoc)')
     return ap.parse_args(argv)
 
