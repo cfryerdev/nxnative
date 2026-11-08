@@ -22,6 +22,7 @@ label = true
 
 [[cheats]]
 name = "Infinite Rupees"
+section = "Consumables"
 note = "By rainbowkittypaw (GBAtemp, 2026-11-06), address +0x2000 for this host; gated on flag a77921d7's slot"
 code = """
 40000000 00000000 00000000
@@ -33,6 +34,7 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Infinite Deku Nuts"
+section = "Consumables"
 note = "By rainbowkittypaw (GBAtemp, 2026-11-06), address +0x2000 for this host; gated on flag f30d9f54's slot"
 code = """
 40000000 00000000 00000000
@@ -44,6 +46,7 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Infinite Deku Sticks"
+section = "Consumables"
 note = "By rainbowkittypaw (GBAtemp, 2026-11-06), address +0x2000 for this host; gated on flag b9494411's slot"
 code = """
 40000000 00000000 00000000
@@ -55,6 +58,7 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Infinite Seeds"
+section = "Consumables"
 note = "By rainbowkittypaw (GBAtemp, 2026-11-06), address +0x2000 for this host; gated on flag 5fadf7fc's slot"
 code = """
 40000000 00000000 00000000
@@ -66,6 +70,7 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Infinite Bombs"
+section = "Consumables"
 note = "By rainbowkittypaw (GBAtemp, 2026-11-06), address +0x2000 for this host; gated on flag db1bcd4f's slot"
 code = """
 40000000 00000000 00000000
@@ -77,6 +82,7 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Infinite Bombchus"
+section = "Consumables"
 note = "By rainbowkittypaw (GBAtemp, 2026-11-06), address +0x2000 for this host; gated on flag df7c517a's slot"
 code = """
 40000000 00000000 00000000
@@ -92,6 +98,7 @@ label = true
 
 [[cheats]]
 name = "20 heart containers"
+section = "Health"
 note = "Found from the game-data table, not from the post: max health (flag fbe01da1) = 80 quarter hearts"
 code = """
 40000000 00000000 00000000
@@ -103,7 +110,112 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Infinite health"
+section = "Health"
 note = "Found from the game-data table: current health (flag 31ab5580) := max health (fbe01da1) every pass"
+code = """
+40000000 00000000 00000000
+14150000 7F370178 31AB5580
+14150000 7F371620 FBE01DA1
+54110000 7F37E184
+A4100410 7F37E15C
+20000000
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+# One-shot "set" cheats: the same gated writes as the infinite ones, but they fire once when toggled and switch themselves off
+# (once=1 in the meta.tsv), with the value asked in the panel (ask, and value_words naming the write's value word)
+
+[[cheats]]
+name = "Set rupees"
+section = "Give"
+note = "Writes the count directly (flag a77921d7's slot gated); asks for the amount"
+code = """
+40000000 00000000 00000000
+14150000 7F370FC0 A77921D7
+04100000 7F37E134 00000000
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Set deku nuts"
+section = "Give"
+note = "Writes the count directly (flag f30d9f54's slot gated); asks for the amount"
+code = """
+40000000 00000000 00000000
+14150000 7F372460 F30D9F54
+04100000 7F37EA1C 00000000
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Set deku sticks"
+section = "Give"
+note = "Writes the count directly (flag b9494411's slot gated); asks for the amount"
+code = """
+40000000 00000000 00000000
+14150000 7F374100 B9494411
+04100000 7F37EA6C 00000000
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Set seeds"
+section = "Give"
+note = "Writes the count directly (flag 5fadf7fc's slot gated); asks for the amount"
+code = """
+40000000 00000000 00000000
+14150000 7F372FF8 5FADF7FC
+04100000 7F37EA44 00000000
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Set bombs"
+section = "Give"
+note = "Writes the count directly (flag db1bcd4f's slot gated); asks for the amount"
+code = """
+40000000 00000000 00000000
+14150000 7F372EA8 DB1BCD4F
+04100000 7F37E83C 00000000
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Set bombchus"
+section = "Give"
+note = "Writes the count directly (flag df7c517a's slot gated); asks for the amount"
+code = """
+40000000 00000000 00000000
+14150000 7F3715E8 DF7C517A
+04100000 7F37E8DC 00000000
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Set heart containers"
+section = "Give"
+note = "Writes max health (flag fbe01da1) and current health (31ab5580) to the same value, gated on both slots; asks in quarter hearts (20 = 5 hearts)"
+code = """
+40000000 00000000 00000000
+14150000 7F370178 31AB5580
+14150000 7F371620 FBE01DA1
+04100000 7F37E184 00000050
+04100000 7F37E15C 00000050
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Full hearts"
+section = "Give"
+note = "One pass of the infinite-health cheat: current health (31ab5580) := max health (fbe01da1), once"
 code = """
 40000000 00000000 00000000
 14150000 7F370178 31AB5580
