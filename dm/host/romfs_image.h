@@ -12,10 +12,10 @@ typedef struct { uint64_t a, b; uint32_t name; uint16_t nlen; uint8_t type, flag
 _Static_assert(sizeof(img_ent) == 24, "RomFS image entry layout");
 #define IMG_ENT_DAMAGED 1    // in the image: this file failed the NCA's hash check and was written as read (nx_extract --allow-damaged)
 #define IMG_ENT_REPORTED 2   // in memory only: the host has named this damaged file in its log
-typedef struct { int fd; uint64_t n, damaged; img_ent *e; const char *names; } romfs_img;
+typedef struct { int fd; uint64_t n, damaged; img_ent *e; const char *names; uint64_t *zext; } romfs_img;   // zext: a NUP mount's zstd extent sizes by entry (nup_image.h), NULL for an image
 
 static void romfs_image_close(romfs_img *m) {
-    if (m) { close(m->fd); free(m->e); free(m); }
+    if (m) { close(m->fd); free(m->e); free(m->zext); free(m); }
 }
 static int romfs_image_read(int fd, void *buf, size_t size, off_t off) {
     size_t got = 0;

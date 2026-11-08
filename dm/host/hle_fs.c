@@ -17,6 +17,10 @@
 #include <sys/clonefile.h>
 #include <sys/xattr.h>
 #include "romfs_image.h"
+#include "nup_image.h"
+#if DM_HAVE_NUP
+#include <zstd.h>
+#endif
 #include "save_sync.h"
 
 // Every take-over in this file runs on the big host stack (hle_bigstack.c): path buffers are sized by PATH_MAX and one file open takes 6-7 KB of stack, while a game's save thread can have as little as 8 KB (Super Mario 3D World + Bowser's Fury)
@@ -136,6 +140,17 @@ static int in_txn_dir(const char *hp) { return save_txn_from_path(hp); }
 static int rm_tree(const char *p);
 // Reads and checks a RomFS image's header and index; NULL (and a red line) when it is not a complete image
 static romfs_img *img_open(const char *path) {
+    if (nup_is(path)) {   // a NUP container (nup_image.h): the RomFS of the version DM_NUP_VERSION names (the Mac launcher's, from Info.plist DMGameVersion), read in place
+        const char *v = getenv("DM_NUP_VERSION"); uint32_t want = v ? (uint32_t)strtoul(v, NULL, 10) : 0, got = 0; char why[512];
+        romfs_img *m = nup_image_open(path, want, &got, why, sizeof why);
+        if (!m) die("the game file %s cannot be used: %s", path, why);
+        uint64_t z = 0; for (uint64_t k = 0; k < m->n; k++) z += (m->e[k].flags & IMG_ENT_ZSTD) != 0;
+#if !DM_HAVE_NUP
+        if (z) die("the game file %s stores %llu files as zstd, which this host was built without (make with Homebrew's zstd)", path, (unsigned long long)z);
+#endif
+        LOG("fs NUP %s: version %u, %llu entries (%llu files stored as zstd, read through a cache)", path, got, (unsigned long long)m->n, (unsigned long long)z);
+        return m;
+    }
     romfs_img *m = romfs_image_open(path);
     if (m) LOG("fs RomFS image %s: %llu entries", path, (unsigned long long)m->n);
     else LOG("[RED] fs RomFS image %s is not a complete image (copied in part? errno=%d)", path, errno);
@@ -833,6 +848,38 @@ HLE_FORCE("_ZN2nn2fs7UnmountEPKc", "fsp-srv; host mounts are permanent, a no-op,
 }
 
 // ---------- Files ----------
+#if DM_HAVE_NUP
+// A NUP mount's files stored as one zstd frame (IMG_ENT_ZSTD, nup_image.h; about 40,600 of Ocarina of Time's 186,600, 3 GB, the rest raw): decompressed whole at their first read
+// and kept, the least recently read going first past ZC_CAP bytes. A read copies from the cache under its lock, so an entry cannot go while it is being read
+#define ZC_SLOTS 512
+#define ZC_CAP (512ull << 20)
+typedef struct { int mi; int64_t k; uint8_t *buf; uint64_t size, used; } zc_ent;
+static zc_ent g_zc[ZC_SLOTS]; static uint64_t g_zc_bytes, g_zc_clock; static pthread_mutex_t g_zc_lock = PTHREAD_MUTEX_INITIALIZER;
+static const uint8_t *zc_get(int mi, int64_t k) {   // g_zc_lock held
+    for (int i = 0; i < ZC_SLOTS; i++) if (g_zc[i].buf && g_zc[i].mi == mi && g_zc[i].k == k) { g_zc[i].used = ++g_zc_clock; return g_zc[i].buf; }
+    const romfs_img *m = g_mnt[mi].img; const img_ent *x = &m->e[k]; uint64_t csz = m->zext[k];
+    uint8_t *in = malloc(csz), *out = malloc(x->b ? x->b : 1);
+    if (!in || !out) die("NUP file cache allocation failed (%llu bytes)", (unsigned long long)(csz + x->b));
+    size_t r = romfs_image_read(m->fd, in, csz, (off_t)x->a) ? ZSTD_decompress(out, x->b, in, csz) : (size_t)-1;
+    free(in);
+    if (ZSTD_isError(r) || r != x->b) {
+        LOG("[RED] fs NUP entry %lld: its zstd frame does not decompress to its %llu bytes (%s): a damaged container", (long long)k, (unsigned long long)x->b, ZSTD_isError(r) ? ZSTD_getErrorName(r) : "short");
+        free(out); return NULL;
+    }
+    int slot = -1;
+    for (;;) {   // room: a free slot within the cap, the least recently read entries out first (a file larger than the cap is kept alone)
+        int lru = -1, free_slot = -1;
+        for (int i = 0; i < ZC_SLOTS; i++) {
+            if (!g_zc[i].buf) { if (free_slot < 0) free_slot = i; continue; }
+            if (lru < 0 || g_zc[i].used < g_zc[lru].used) lru = i;
+        }
+        if (free_slot >= 0 && (g_zc_bytes + x->b <= ZC_CAP || lru < 0)) { slot = free_slot; break; }
+        g_zc_bytes -= g_zc[lru].size; free(g_zc[lru].buf); g_zc[lru].buf = NULL;
+    }
+    g_zc[slot] = (zc_ent){mi, k, out, x->b, ++g_zc_clock}; g_zc_bytes += x->b;
+    return out;
+}
+#endif
 HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Result, h_fs_OpenFile, uint64_t *out, const char *path, int mode) { dm_thread_service_request();
     int mi; int64_t k;
     if (img_path(path, &mi, &k)) {
@@ -869,6 +916,17 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
         const img_ent *x = &g_mnt[IMG_M(h)].img->e[IMG_K(h)];
         fd = g_mnt[IMG_M(h)].img->fd; base = (int64_t)x->a;
         sz = off < 0 || (uint64_t)off >= x->b ? 0 : (size_t)(x->b - off) < sz ? (size_t)(x->b - off) : sz;
+#if DM_HAVE_NUP
+        if (x->flags & IMG_ENT_ZSTD) {   // a NUP file stored as zstd: from the decompressed copy (zc_get)
+            dm_guest_write_prepare(buf, sz);
+            pthread_mutex_lock(&g_zc_lock);
+            const uint8_t *z = zc_get(IMG_M(h), IMG_K(h));
+            if (z && sz) memcpy(buf, z + off, sz);
+            pthread_mutex_unlock(&g_zc_lock);
+            if (!z) { errno = EIO; return err_res("zstd", "NUP file"); }
+            *out = sz; return RES_OK;
+        }
+#endif
     }
     dm_guest_write_prepare(buf, sz);   // The destination may be a texture pool page write-protected by the graphics layer: a kernel write to a read-only page returns EFAULT instead of page-faulting, so unprotect and mark dirty first
     while (got < sz) {

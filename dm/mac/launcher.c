@@ -25,6 +25,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include "romfs_image.h"
+#include "nup_image.h"
 #include "save_sync.h"
 
 extern char **environ;
@@ -146,6 +147,57 @@ static void cloud_saves_folder(void) {
     if (v) CFRelease(v);
 }
 
+// A string in this app's preferences (the settings window writes them through @AppStorage), "" when unset
+static int pref_string(CFStringRef key, char *s, size_t n) {
+    CFStringRef domain = CFBundleGetIdentifier(CFBundleGetMainBundle()); *s = 0;
+    if (!domain) return 0;
+    CFPropertyListRef v = CFPreferencesCopyAppValue(key, domain);
+    int ok = v && CFGetTypeID(v) == CFStringGetTypeID() && CFStringGetCString(v, s, (CFIndex)n, kCFStringEncodingUTF8) && *s;
+    if (v) CFRelease(v);
+    if (!ok) *s = 0;
+    return ok;
+}
+
+// Game file: an app packed without the game's RomFS (pack_app.py --no-romfs) reads it from the file the player chose in the settings window (Launcher.swift GameFileSection,
+// game.file in the app's preferences): a NUP container (nup_image.h) holding the version the app was built for (Info.plist DMGameVersion), or a RomFS image. A DM_ROMFS that the
+// launch environment or an env file set wins. 1 with DM_ROMFS set; 0 with the reason in why
+// Whether path is a game file this app can run (also the settings window's check when the player picks one, Launcher.swift): 1, or 0 with the reason in why
+int dm_game_file_check(const char *path, char *why, size_t n) {
+    char v[32] = ""; info_string("DMGameVersion", v, sizeof v);
+    uint32_t want = (uint32_t)strtoul(v, NULL, 10), got = 0;
+    if (nup_is(path)) {
+        romfs_img *m = nup_image_open(path, want, &got, why, n); if (!m) return 0;
+        romfs_image_close(m); snprintf(why, n, "NUP, version %u", got); return 1;
+    }
+    romfs_img *m = romfs_image_open(path);
+    if (!m) { snprintf(why, n, "%s is not a NUP file", path); return 0; }
+    romfs_image_close(m); snprintf(why, n, "RomFS image"); return 1;
+}
+static int game_file(char *why, size_t n) {
+    char s[PATH_MAX], v[32] = "";
+    if (!getenv("DM_ROMFS") && pref_string(CFSTR("game.file"), s, sizeof s)) setenv("DM_ROMFS", s, 1);
+    const char *g = getenv("DM_ROMFS");
+    if (!g || !*g) { snprintf(why, n, "Choose the game file (the game's .nup) under Game file in this app's settings window, then press Play."); return 0; }
+    if (info_string("DMGameVersion", v, sizeof v) && *v) setenv("DM_NUP_VERSION", v, 0);
+    if (!dm_game_file_check(g, why, n)) return 0;
+    fprintf(stderr, "launcher: game file %s (%s)\n", g, why);
+    return 1;
+}
+
+// Button icons: an overlay of the game's RomFS packed into the app (pack_app.py --overlay NAME=DIR, Resources/overlays/NAME) and chosen in the settings window (Launcher.swift
+// ButtonIconsSection, buttonIcons.choice; "" = the game's own) goes in front of any DM_ROMFS_OVERLAY already set (hle_fs.c reads the first root that has a path)
+static void button_icons(const char *res) {
+    char s[256], dir[PATH_MAX]; struct stat st;
+    const char *e = getenv("DM_BUTTON_ICONS");
+    if (e) snprintf(s, sizeof s, "%s", e); else if (!pref_string(CFSTR("buttonIcons.choice"), s, sizeof s)) return;
+    if (!*s || strchr(s, '/') || !strcmp(s, "..")) return;
+    snprintf(dir, sizeof dir, "%s/overlays/%s", res, s);
+    if (stat(dir, &st) || !S_ISDIR(st.st_mode)) { fprintf(stderr, "[RED] launcher: button icons %s: no %s in this app\n", s, dir); return; }
+    const char *old = getenv("DM_ROMFS_OVERLAY"); char v[8192];
+    snprintf(v, sizeof v, "%s%s%s", dir, old && *old ? ":" : "", old && *old ? old : "");
+    setenv("DM_ROMFS_OVERLAY", v, 1); fprintf(stderr, "launcher: button icons %s (%s)\n", s, dir);
+}
+
 // A game of several programs (Super Mario 3D All-Stars): pack_app.py's table of them, with this app's paths filled in (it may move), for oe::ExecuteProgram (DM_PROGRAMS, hle_oe.c)
 static void programs_table(const char *contents, const char *res, const char *sup) {
     char in[PATH_MAX], out[PATH_MAX]; snprintf(in, sizeof in, "%s/dm/programs.tsv", res); snprintf(out, sizeof out, "%s/programs.tsv", sup);
@@ -172,11 +224,12 @@ int main(int argc, char **argv) {
     info_string("DMRomfsMarker", marker, sizeof marker); info_string("DMLanguage", lang, sizeof lang);
     if (!info_string("DMTitleID", id, sizeof id) || strchr(id, '/')) { alert(name, "This app has no title ID in its Info.plist (DMTitleID): pack it again with build_ipa_from_nsp.py --platform mac-app."); return 1; }
     struct stat st; snprintf(p, sizeof p, "%s/romfs.img", res);
-    int valid_romfs;
+    int valid_romfs, external = 0;   // external: packed without the RomFS (pack_app.py --no-romfs); the player's game file (game_file) has it
     if (!stat(p, &st)) {
         romfs_img *image = romfs_image_open(p); valid_romfs = image != NULL;
         romfs_image_close(image); snprintf(romfs, sizeof romfs, "%s", p);
-    } else { snprintf(p, sizeof p, "%s/%s", romfs, marker); valid_romfs = !stat(p, &st); }
+    } else if (stat(romfs, &st)) { external = 1; valid_romfs = 1; }
+    else { snprintf(p, sizeof p, "%s/%s", romfs, marker); valid_romfs = !stat(p, &st); }
     if (access(host, X_OK) || !valid_romfs || !modules_present(dm)) {
         alert(name, "The game data inside this app is missing or incomplete (Contents/Resources/romfs.img, Contents/Resources/dm or Contents/MacOS/dmhost): pack it again with build_ipa_from_nsp.py --platform mac-app.");
         return 1;
@@ -201,11 +254,15 @@ int main(int argc, char **argv) {
     int window = !(getenv("DM_LAUNCHER") && !strcmp(getenv("DM_LAUNCHER"), "0"));
     for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--no-launcher")) window = 0;
     if (!window) fprintf(stderr, "launcher: no settings window (DM_LAUNCHER=0 or --no-launcher)\n");
+    { char g[PATH_MAX]; if (external && !getenv("DM_ROMFS") && !pref_string(CFSTR("game.file"), g, sizeof g)) setenv("DM_LAUNCHER_FORCE", "1", 1); }   // no game file yet: the window shows to ask for it
     int shown = window ? dm_mac_launcher() : 2;
     if (!shown) return 0;   // Quit: no game
     if (shown == 2) saved_choices();
     cloud_saves_folder();
-    setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_SAVE", save, 0); setenv("DM_TEMP", temp, 0);
+    if (external) { char why[1024]; if (!game_file(why, sizeof why)) { alert(name, why); return 1; } }
+    else setenv("DM_ROMFS", romfs, 0);
+    button_icons(res);
+    setenv("DM_ROOT", sup, 0); setenv("DM_SAVE", save, 0); setenv("DM_TEMP", temp, 0);
     snprintf(p, sizeof p, "%s/msl", res); setenv("DM_MSL_DIR", p, 0);
     snprintf(p, sizeof p, "%s/font", dm); setenv("DM_FONT_DIR", p, 0);
     snprintf(p, sizeof p, "%s/shader_map.tsv", dm); if (!stat(p, &st)) setenv("DM_NVN_SHMAP", p, 0);

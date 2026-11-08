@@ -16,6 +16,7 @@ struct LauncherView: View {
     let fit: (CGFloat) -> Void
     @AppStorage("window.show") private var show = true
     @AppStorage("window.advanced") private var advanced = false
+    @AppStorage("game.file") private var gameFile = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -29,7 +30,9 @@ struct LauncherView: View {
             }
             .padding([.horizontal, .top], 20)
             Form {
+                if GameFile.external { GameFileSection() }
                 settingSections(basic: true)
+                if !ButtonIconsSection.choices.isEmpty { ButtonIconsSection() }
                 CloudSavesSection()
                 Section {
                     DisclosureGroup("Advanced settings", isExpanded: $advanced) {}
@@ -55,6 +58,7 @@ struct LauncherView: View {
                 Spacer()
                 Button("Quit") { done(false) }
                 Button("Play") { done(true) }.keyboardShortcut(.defaultAction)
+                    .disabled(!GameFile.ready(gameFile))
             }
             .padding(20)
         }
@@ -115,6 +119,87 @@ struct CloudSavesSection: View {
     static func shown(_ path: String) -> String {
         guard path == drive || path.hasPrefix(drive + "/") else { return path }
         return (["iCloud Drive"] + path.dropFirst(drive.count).split(separator: "/").map(String.init)).joined(separator: " › ")
+    }
+}
+
+@_silgen_name("dm_game_file_check")
+private func dmGameFileCheck(_ path: UnsafePointer<CChar>, _ why: UnsafeMutablePointer<CChar>, _ n: Int) -> Int32   // launcher.c
+
+/// Game file: an app packed without the game's RomFS (pack_app.py --no-romfs) runs the game from a file the player chooses, the game's NUP (or a RomFS image), kept in this app's
+/// preferences as game.file, which launcher.c puts into DM_ROMFS; a DM_ROMFS an env file or the launch environment set wins, and is shown here
+enum GameFile {
+    static let external: Bool = {
+        guard let r = Bundle.main.resourceURL else { return false }
+        let fm = FileManager.default
+        return !fm.fileExists(atPath: r.appendingPathComponent("romfs.img").path) && !fm.fileExists(atPath: r.appendingPathComponent("romfs").path)
+    }()
+    static let fixed: String? = {
+        let env = ProcessInfo.processInfo.environment
+        let keys = ((env["DM_ENV_FILE_KEYS"] ?? "") + " " + (env["DM_ENV_LAUNCH_KEYS"] ?? "")).split(separator: " ")
+        return keys.contains("DM_ROMFS") || env["DM_ROMFS"] != nil ? env["DM_ROMFS"] : nil
+    }()
+    static func ready(_ file: String) -> Bool { !external || fixed != nil || (!file.isEmpty && FileManager.default.fileExists(atPath: file)) }
+    /// launcher.c's check (dm_game_file_check): a NUP holding the version this app was built for, or a RomFS image
+    static func check(_ path: String) -> (ok: Bool, why: String) {
+        var why = [CChar](repeating: 0, count: 1024)
+        let ok = path.withCString { dmGameFileCheck($0, &why, why.count) } == 1
+        return (ok, String(cString: why))
+    }
+}
+
+struct GameFileSection: View {
+    @AppStorage("game.file") private var file = ""
+    @State private var problem: String?
+
+    var body: some View {
+        Section {
+            LabeledContent("Game file") {
+                Text(GameFile.fixed.map { "\($0) (env.txt)" } ?? (file.isEmpty ? "Not chosen" : file))
+                    .foregroundStyle(GameFile.ready(file) ? Color.secondary : Color.red).lineLimit(1).truncationMode(.head)
+            }
+            if GameFile.fixed == nil {
+                Button(file.isEmpty ? "Choose game file…" : "Choose a different file…", action: choose)
+            }
+            if let p = problem ?? missing { Text(p).foregroundStyle(.red).font(.callout) }
+        } footer: {
+            Text("The game's .nup file. The game is read straight from it, so leave it where it is; a file on an external drive works while the drive is connected.")
+        }
+    }
+
+    private var missing: String? {
+        GameFile.fixed == nil && !file.isEmpty && !FileManager.default.fileExists(atPath: file) ? "The game file is no longer there: choose it again." : nil
+    }
+
+    private func choose() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true; panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
+        panel.prompt = "Use This File"; panel.message = "Choose the game's .nup file"
+        if !file.isEmpty { panel.directoryURL = URL(fileURLWithPath: file).deletingLastPathComponent() }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let r = GameFile.check(url.path)
+        if r.ok { file = url.path; problem = nil } else { problem = r.why }
+    }
+}
+
+/// Button icons: the RomFS overlays packed into the app (pack_app.py --overlay NAME=DIR: Resources/overlays/NAME), each another controller's icons and controls screen; the choice is
+/// kept as buttonIcons.choice ("" = the game's own), which launcher.c puts in front of DM_ROMFS_OVERLAY
+struct ButtonIconsSection: View {
+    static let choices: [String] = {
+        guard let dir = Bundle.main.resourceURL?.appendingPathComponent("overlays"),
+              let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return [] }
+        return names.filter { !$0.hasPrefix(".") }.sorted()
+    }()
+    @AppStorage("buttonIcons.choice") private var choice = ""
+
+    var body: some View {
+        Section {
+            Picker("Button icons", selection: $choice) {
+                Text("Switch").tag("")
+                ForEach(Self.choices, id: \.self) { Text($0).tag($0) }
+            }
+        } footer: {
+            Text("The button icons the game shows, and the controller on its controls screen.")
+        }
     }
 }
 
@@ -183,7 +268,8 @@ enum LauncherWindowLayout {
 public func dmMacLauncher() -> Int32 {
     guard let url = Bundle.main.resourceURL?.appendingPathComponent("dm/launcher.json"), let data = try? Data(contentsOf: url) else { return 2 }
     guard let file = try? JSONDecoder().decode(SettingsFile.self, from: data), !file.settings.isEmpty else { fputs("[RED] launcher: dm/launcher.json cannot be read; starting the game\n", stderr); return 2 }
-    if (UserDefaults.standard.object(forKey: "window.show") as? Bool) == false && !NSEvent.modifierFlags.contains(.option) {
+    // DM_LAUNCHER_FORCE (launcher.c): the app has no game file yet, so the window shows to ask for it
+    if (UserDefaults.standard.object(forKey: "window.show") as? Bool) == false && !NSEvent.modifierFlags.contains(.option) && ProcessInfo.processInfo.environment["DM_LAUNCHER_FORCE"] == nil {
         fputs("launcher: settings window off (hold Option at launch to show it)\n", stderr)
         return 2
     }
