@@ -598,6 +598,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - `nvnWindowGetPresentInterval`, `nvnCommandBufferSetCopyImageStride` missing. → [SDK 8 window and copy-stride entry points](../reference/nvn-objects.md#sdk-8-window-and-copy-stride-entry-points)
 - `[RED] texture bound to an image slot lacks the shader-write usage`, and compute image writes go to a dummy texture. → [Image bindings supply shader-write intent](../reference/nvn-objects.md#image-bindings-supply-shader-write-intent)
 - a Switch 2 load makes private textures and their tiled guest copies resident together. Bindless descriptor scans can also allocate fresh zero-filled textures for retired objects whose aliases have already been replaced, triggering more alias takeovers and table rebuilds. → [A raw address table pins CPU-only pools and revives retired textures](../reference/nvn-objects.md#a-raw-address-table-pins-cpu-only-pools-and-revives-retired-textures)
+- a large pool keeps both its contiguous raw-address mapping and earlier overlapping chunks resident. → [Whole-pool mappings leave obsolete chunks resident](../reference/nvn-objects.md#whole-pool-mappings-leave-obsolete-chunks-resident)
 
 ## Rendering
 
